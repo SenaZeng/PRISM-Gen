@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+*.log
+pipeline/core/logs/
+# results are generated artifacts
+pipeline/results/
+
+# caches / logs
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+*.log
+pipeline/results/pretrained_model/model/*.pth
