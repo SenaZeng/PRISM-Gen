@@ -4,7 +4,7 @@ __pycache__/
 *.log
 pipeline/core/logs/
 # results are generated artifacts
-pipeline/results/
+
 
 # caches / logs
 __pycache__/
