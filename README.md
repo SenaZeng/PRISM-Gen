@@ -1,115 +1,163 @@
 # PRISM-Gen
 
-## English
+**Physics-guided Robust Inhibitor Selection Method — Generative Module**
 
-**PRISM-Gen** is a physics-informed multi-stage computational framework for the discovery of **broad-spectrum coronavirus main protease (Mpro) inhibitors**.
-
-The framework integrates generative molecular design, surrogate modeling, multi-fidelity electronic-structure screening, and multi-target docking to prioritize candidate molecules with predicted cross-strain binding competence.
-
-This repository provides the implementation of the **PRISM-Gen pipeline** used for computational prioritization of candidate inhibitors targeting coronavirus Mpro orthologs.
+A multi-fidelity computational framework for the discovery of broad-spectrum coronavirus main protease (M<sup>pro</sup>) inhibitors.
 
 ---
 
-## 中文
+## Overview
 
-**PRISM-Gen** 是一个物理信息驱动（physics-informed）的多阶段计算框架，用于发现 **广谱冠状病毒主蛋白酶（Mpro）抑制剂**。
+**PRISM-Gen** integrates generative molecular design with hierarchical quantum-chemical screening and multi-target docking to prioritize candidate inhibitors with predicted cross-strain binding competence against coronavirus M<sup>pro</sup> orthologs.
 
-该框架整合了生成式分子设计、代理模型预测、多保真电子结构筛选以及多靶点分子对接等方法，用于优先筛选具有潜在跨病毒株结合能力的候选分子。
+### Pipeline Architecture
 
-本仓库提供 **PRISM-Gen pipeline** 的实现，用于对冠状病毒 Mpro 靶点的候选抑制剂进行计算优先级筛选。
+The framework follows a seven-stage multi-fidelity screening strategy:
 
----
+| Stage | Method | Purpose |
+|-------|--------|---------|
+| 1 | FRATTVAE | Fragment-tree variational autoencoder for molecular generation |
+| 2 | Uni-Mol surrogate model | Predicted inhibitory activity scoring |
+| 3 | Latent-space optimization | Reward-guided exploration of chemical space |
+| 4 | GFN2-xTB + GEM | Semi-empirical electronic screening with Gaussian Electronic Moderation |
+| 5 | B3LYP/6-31G* DFT | High-level electronic-structure validation |
+| 6 | ADMET filtering | Drug-likeness and pharmacokinetic assessment |
+| 7 | Multi-target docking | Worst-case broad-spectrum scoring across SARS-CoV-2, SARS-CoV-1, and MERS-CoV M<sup>pro</sup> |
 
-# Overview / 项目概述
+### Key Features
 
-## English
-
-The PRISM-Gen workflow follows a hierarchical multi-stage screening strategy designed to balance exploration of chemical space with physical and structural validation.
-
-The pipeline consists of the following stages:
-
-1. **Fragment-based molecular generation**  
-   Candidate molecules are generated using a fragment-tree variational autoencoder (FRATTVAE).
-
-2. **Surrogate-guided activity prediction**  
-   A machine-learning surrogate model based on Uni-Mol representations estimates predicted inhibitory activity.
-
-3. **Semi-empirical electronic screening (GFN2-xTB)**  
-   Frontier orbital energies and electrostatic descriptors are computed to identify electronically unstable molecules.
-
-4. **Density Functional Theory (DFT) validation**  
-   Selected candidates are evaluated using DFT calculations (e.g., B3LYP/6-31G*) to refine electronic descriptors.
-
-5. **ADMET filtering**  
-   Drug-likeness and pharmacokinetic properties are evaluated.
-
-6. **Broad-spectrum multi-target docking**  
-   Molecules are docked against Mpro structures from multiple coronaviruses  
-   (SARS-CoV-2, SARS-CoV-1, and MERS-CoV).
-
-
+- **Multi-fidelity electronic screening:** Three-tier cascade (xTB → GEM → DFT) balancing computational cost and physical accuracy
+- **Gaussian Electronic Moderation (GEM):** Continuous scoring that re-ranks candidates rather than applying hard electronic cutoffs, preserving scaffold diversity
+- **Worst-case broad-spectrum docking:** Candidates ranked by weakest cross-target affinity (Score<sub>broad</sub> = max E<sub>i</sub>), selecting for consistent multi-target binding
+- **Generator-agnostic architecture:** Downstream screening stages are decoupled from the generator and accept SMILES from any source
 
 ---
 
-## 中文
+## Repository Structure
 
-PRISM-Gen 工作流程采用 **分层多阶段筛选策略**，在化学空间探索与物理结构验证之间取得平衡。
-
-该 pipeline 包含以下主要步骤：
-
-1. **基于片段的分子生成**  
-   使用 fragment-tree 变分自编码器（FRATTVAE）生成候选分子。
-
-2. **代理模型活性预测**  
-   基于 Uni-Mol 表征的机器学习模型预测候选分子的潜在抑制活性。
-
-3. **半经验电子结构筛选（GFN2-xTB）**  
-   计算前线轨道能级和电荷分布等电子结构描述符，以识别电子结构异常的分子。
-
-4. **密度泛函理论（DFT）验证**  
-   对筛选后的候选分子进行 DFT 计算（如 B3LYP/6-31G*），以获得更精确的电子结构信息。
-
-5. **ADMET 性质筛选**  
-   评估候选分子的药物相似性和药代动力学性质。
-
-6. **多靶点广谱分子对接**  
-   将候选分子分别对接到多个冠状病毒的 Mpro 蛋白结构  
-   （SARS-CoV-2、SARS-CoV-1、MERS-CoV）。
-
-
----
-
-# Key Features / 主要特点
-
-## English
-
-- Physics-informed generative molecular design  
-- Multi-fidelity electronic-structure screening  
-- Gaussian Electronic Moderation (GEM) scoring  
-- Distributionally robust multi-target docking  
-- Broad-spectrum antiviral prioritization  
-
-## 中文
-
-- 物理信息驱动的生成式分子设计  
-- 多保真电子结构筛选  
-- Gaussian Electronic Moderation (GEM) 评分机制  
-- 分布鲁棒（distributionally robust）的多靶点对接策略  
-- 广谱抗病毒候选分子优先筛选  
+```
+PRISM-Gen/
+├── pipeline/                    # Core pipeline source code
+│   ├── core/                    # Step-by-step implementation (Steps 1–6)
+│   │   ├── step1_vae.py         # FRATTVAE molecular generation
+│   │   ├── step2_surrogate.py   # Surrogate activity prediction
+│   │   ├── step3a_optimize.py   # Latent-space optimization
+│   │   ├── step3b_run_dft.py    # GFN2-xTB electronic screening
+│   │   ├── step3c_dft_refine.py # GEM scoring and re-ranking
+│   │   ├── step4a_admet.py      # ADMET filtering
+│   │   ├── step4b_final_pyscf.py# B3LYP/6-31G* DFT validation
+│   │   ├── step5a_docking.py    # Multi-target broad-spectrum docking
+│   │   └── ...
+│   ├── data/                    # Input data and receptor structures
+│   ├── models/                  # Pretrained model checkpoints
+│   ├── results/                 # Pipeline output directory
+│   ├── environment.yml          # Conda environment specification
+│   ├── requirements.txt         # Pip dependency list
+│   └── INSTALL.md               # Detailed installation guide
+├── openclaw-skill/              # ClawHub interactive demo skill
+├── LICENSE
+└── README.md
+```
 
 ---
 
-# Repository Structure / 仓库结构
+## Quick Start
 
+### 1. Installation
+
+```bash
+git clone https://github.com/SenaZeng/PRISM-Gen.git
+cd PRISM-Gen
+
+# Create conda environment
+conda env create -f pipeline/environment.yml
+conda activate ai_drug_design
+```
+
+For detailed installation instructions, dependency versions, and troubleshooting, see [`pipeline/INSTALL.md`](pipeline/INSTALL.md).
+
+### 2. Download Pretrained Checkpoint
+
+The FRATTVAE checkpoint (~125 MB) is archived on Zenodo:
+
+```bash
+wget https://zenodo.org/records/18764996/files/model_best.pth -O pipeline/models/model_best.pth
+```
+
+**Zenodo DOI:** [10.5281/zenodo.18764996](https://doi.org/10.5281/zenodo.18764996)
+
+### 3. Run the Pipeline
+
+```bash
+cd pipeline
+
+# Run the full pipeline (Steps 1–6)
+python core/run_pipeline.py
+
+# Or run individual stages
+python core/step1_vae.py                  # Molecular generation
+python core/step3b_run_dft.py             # xTB electronic screening
+python core/step4b_final_pyscf.py         # DFT validation
+python core/step5a_docking.py \
+    --receptor_dir data/receptors \
+    --top_n 36                            # Multi-target docking
+```
+
+---
+
+## Data Sources
+
+| Data | Source | Usage |
+|------|--------|-------|
+| M<sup>pro</sup> activity labels | [TDC SARS-CoV-2 M<sup>pro</sup> benchmark](https://tdcommons.ai/) | Surrogate model training |
+| hERG safety labels | [TDC hERG central dataset](https://tdcommons.ai/) | Cardiac toxicity filtering |
+| SARS-CoV-2 M<sup>pro</sup> | [PDB: 6W63](https://www.rcsb.org/structure/6W63) | Docking target |
+| SARS-CoV-1 M<sup>pro</sup> | [PDB: 3V3M](https://www.rcsb.org/structure/3V3M) | Docking target |
+| MERS-CoV M<sup>pro</sup> | [PDB: 4YLU](https://www.rcsb.org/structure/4YLU) | Docking target |
+
+---
+
+## Interactive Demo
+
+An interactive analysis tool for exploring pre-calculated screening results is available on ClawHub:
+
+🔗 [https://clawhub.ai/SenaZeng/prism-gen-demo](https://clawhub.ai/SenaZeng/prism-gen-demo) (v1.0.4)
+
+Source files for the demo skill are provided in the [`openclaw-skill/`](openclaw-skill/) directory.
+
+---
+
+## Key Software Versions
+
+| Software | Version |
+|----------|---------|
+| Python | 3.9 |
+| RDKit | 2025.03.2 |
+| PySCF | 2.11.0 |
+| GFN2-xTB | 6.7.1 |
+| AutoDock Vina | 1.1.2 |
+| PyTorch | 1.12.1 (CUDA 11.3) |
+| DGL | 0.9.1.post1 |
+
+See [`pipeline/INSTALL.md`](pipeline/INSTALL.md) for the complete dependency list.
+
+---
+
+## Citation
+
+If you use PRISM-Gen in your research, please cite:
+
+> [Citation will be added upon publication]
+
+---
 
 ## License
 
 This repository is released for **academic research purposes only**.
-
 Any commercial use of this software requires explicit permission from the author.
 
-## 许可协议
+---
 
-本仓库仅用于 **学术研究用途**。
+## Contact
 
-任何商业用途均需获得作者明确许可。
+For questions or issues, please open a [GitHub Issue](https://github.com/SenaZeng/PRISM-Gen/issues).
