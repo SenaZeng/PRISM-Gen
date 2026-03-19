@@ -20,8 +20,8 @@ The framework follows a seven-stage multi-fidelity screening strategy:
 | 2 | Uni-Mol surrogate model | Predicted inhibitory activity scoring |
 | 3 | Latent-space optimization | Reward-guided exploration of chemical space |
 | 4 | GFN2-xTB + GEM | Semi-empirical electronic screening with Gaussian Electronic Moderation |
-| 5 | B3LYP/6-31G* DFT | High-level electronic-structure validation |
-| 6 | ADMET filtering | Drug-likeness and pharmacokinetic assessment |
+| 5 | ADMET filtering | Drug-likeness and pharmacokinetic assessment |
+| 6 | B3LYP/6-31G* DFT | High-level electronic-structure validation |
 | 7 | Multi-target docking | Worst-case broad-spectrum scoring across SARS-CoV-2, SARS-CoV-1, and MERS-CoV M<sup>pro</sup> |
 
 ### Key Features
