@@ -1,20 +1,23 @@
-# 文件: core/step4c_utils_merge_results.py
+# File: core/step4c_utils_merge_results.py
 # -*- coding: utf-8 -*-
 """
-Step 4C: Master Summary Generator (Professional Edition)
+Step 4C: Master Summary Generator
 
-角色：
-- 作为整个流水线的“数据仓库 (Data Warehouse)”，
-  统一汇总 Step3c (RL + xTB/DFT)、Step4a (ADMET + R_ADMET + R_global)、
-  以及可选的 Step4b (PySCF) 结果。
-- 对 SMILES 做统一规范化，避免合并时错配。
-- 给每个分子增加 Filter_Status / Data_Source_Status 等标签，
-  方便后续画漏斗图、做统计分析。
+Role:
+- Acts as the pipeline's central data warehouse, consolidating results from
+  Step 3C (RL + xTB/DFT), Step 4A (ADMET + R_ADMET + R_global),
+  and optionally Step 4B (PySCF high-accuracy DFT).
+- Applies unified SMILES canonicalization to prevent merge mismatches.
+- Attaches Filter_Status / Data_Source_Status labels to each molecule
+  for downstream funnel visualization and statistical analysis.
 
-提升点：
-1. [关键] SMILES 归一化 (canonicalization)，防止因为字符串写法不同导致 merge 失败。
-2. [关键] 自动按文件名模式 + 修改时间找到最新 CSV，而不是手写 alt_names。
-3. [关键] 增加 Filter_Status / Is_Final_Top / Data_Source_Status 等标签，透明化筛选逻辑。
+Key improvements:
+1. [Critical] SMILES canonicalization prevents merge failures caused by
+   different string representations of the same molecule.
+2. [Critical] Automatically locates the latest CSV matching a filename
+   pattern and modification time, rather than hard-coding filenames.
+3. [Critical] Adds Filter_Status / Is_Final_Top / Data_Source_Status labels
+   to make the filtering logic fully transparent.
 """
 
 import os
@@ -25,18 +28,18 @@ from typing import Optional
 
 
 def _results_dir():
-    """返回 ../results 的绝对路径（相对于 core 目录）"""
+    """Return the absolute path to ../results (relative to the core/ directory)."""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.abspath(os.path.join(current_dir, "..", "results"))
 
 
-# ===================== SMILES 归一化 ===================== #
+# ===================== SMILES canonicalization ===================== #
 
 def canonicalize_smiles(smiles: str) -> str:
     """
-    使用 RDKit 对 SMILES 做规范化（canonicalization）：
-      - 统一成同一套规则 (isomericSmiles=True)
-      - 防止 "CCO" vs "OCC" 等等写法不同导致的 merge mismatch
+    Canonicalize a SMILES string using RDKit (isomericSmiles=True).
+    Prevents merge mismatches caused by different representations
+    of the same molecule (e.g. "CCO" vs "OCC").
     """
     if not isinstance(smiles, str):
         return smiles
@@ -49,71 +52,70 @@ def canonicalize_smiles(smiles: str) -> str:
         return smiles
 
 
-# ===================== 文件自动发现 ===================== #
+# ===================== Automatic file discovery ===================== #
 
 def find_latest_file(base_dir: str, pattern: str, required: bool = True) -> Optional[str]:
     """
-    在 base_dir 里根据通配符 pattern 查找 CSV：
-      - 例如 pattern="step3c_dft_refined*.csv"
-      - 按修改时间排序，取最新版本
+    Find the most recently modified CSV in base_dir matching the glob pattern.
+    Example: pattern="step3c_dft_refined*.csv"
     """
     search_path = os.path.join(base_dir, pattern)
     files = glob.glob(search_path)
     if not files:
         if required:
-            raise FileNotFoundError(f"❌ 未找到符合模式的文件: {search_path}")
+            raise FileNotFoundError(f"❌ No file found matching pattern: {search_path}")
         else:
-            print(f"⚠️ 可选文件未找到: {search_path}")
+            print(f"⚠️ Optional file not found: {search_path}")
             return None
 
     latest_file = max(files, key=os.path.getmtime)
-    print(f"✅ 锁定文件: {os.path.basename(latest_file)} (pattern={pattern})")
+    print(f"✅ Located file: {os.path.basename(latest_file)} (pattern={pattern})")
     return latest_file
 
 
-# ===================== 主合并逻辑 ===================== #
+# ===================== Main merge logic ===================== #
 
 def merge_all_steps():
     base_dir = _results_dir()
-    print(f">>> 正在构建 Step4C Master Summary (Base: {base_dir})...")
+    print(f">>> Building Step 4C Master Summary (base dir: {base_dir})...")
 
-    # ---------- 1. 读取 Step3c (必需) ----------
+    # ---------- 1. Load Step 3C (required) ----------
     path_3c = find_latest_file(base_dir, "step3c_dft_refined*.csv", required=True)
     df_3c = pd.read_csv(path_3c)
 
     if "smiles" not in df_3c.columns:
-        raise ValueError(f"{path_3c} 中缺少 'smiles' 列")
+        raise ValueError(f"'smiles' column missing from {path_3c}")
 
-    print("   -> 正在归一化 Step3c SMILES...")
+    print("   -> Canonicalizing Step 3C SMILES...")
     df_3c["merge_key"] = df_3c["smiles"].apply(canonicalize_smiles)
 
-    # ---------- 2. 读取 Step4a ADMET (必需) ----------
+    # ---------- 2. Load Step 4A ADMET (required) ----------
     path_4a = find_latest_file(base_dir, "step4a_admet*.csv", required=True)
     df_4a = pd.read_csv(path_4a)
 
     if "smiles" not in df_4a.columns:
-        raise ValueError(f"{path_4a} 中缺少 'smiles' 列")
+        raise ValueError(f"'smiles' column missing from {path_4a}")
 
-    print("   -> 正在归一化 Step4a SMILES...")
+    print("   -> Canonicalizing Step 4A SMILES...")
     df_4a["merge_key"] = df_4a["smiles"].apply(canonicalize_smiles)
 
-    # ---------- 3. 读取 Step4b PySCF (可选) ----------
+    # ---------- 3. Load Step 4B PySCF (optional) ----------
     path_4b = find_latest_file(base_dir, "*pyscf*.csv", required=False)
     df_4b = None
     if path_4b:
         df_4b = pd.read_csv(path_4b)
         if "smiles" not in df_4b.columns:
-            print(f"⚠️ {path_4b} 中没有 'smiles' 列，将忽略 PySCF 数据。")
+            print(f"⚠️ 'smiles' column missing from {path_4b}; PySCF data will be ignored.")
             df_4b = None
         else:
-            print("   -> 正在归一化 Step4b SMILES...")
+            print("   -> Canonicalizing Step 4B SMILES...")
             df_4b["merge_key"] = df_4b["smiles"].apply(canonicalize_smiles)
 
-    # ============ 4. 开始合并 ============ #
+    # ============ 4. Merge steps ============ #
 
-    print(">>> 合并 Step3c (base) + Step4a (ADMET)...")
+    print(">>> Merging Step 3C (base) + Step 4A (ADMET)...")
 
-    # 从 Step4a 中只挑选“新增信息列”，避免覆盖 Step3c 中已有的列
+    # Only bring in new columns from Step 4A to avoid overwriting Step 3C columns
     admet_extra_cols = [
         c for c in df_4a.columns
         if c not in df_3c.columns and c not in ("smiles",)
@@ -128,9 +130,9 @@ def merge_all_steps():
         how="left",
     )
 
-    # 合并 PySCF 结果（如果有）
+    # Merge PySCF results if available
     if df_4b is not None:
-        print(">>> 发现 Step4b PySCF 结果，正在合并...")
+        print(">>> Step 4B PySCF results found; merging...")
         pyscf_extra_cols = [
             c for c in df_4b.columns
             if c not in df_merge.columns and c not in ("smiles",)
@@ -145,16 +147,16 @@ def merge_all_steps():
             how="left",
         )
     else:
-        print("⚠️ 未能合并 PySCF 数据（文件缺失或不合法），后续筛选仅基于 ADMET / R_global 等。")
+        print("⚠️ PySCF data not merged (file missing or invalid). Downstream filtering will rely on ADMET / R_global only.")
 
-    # ============ 5. Data_Source_Status：跑通了哪些步骤？ ============ #
+    # ============ 5. Data_Source_Status: which pipeline stages completed? ============ #
 
     def determine_data_source_status(row: pd.Series) -> str:
         """
-        标记该分子在流水线中跑到了哪一步：
-          - Step3c_Only: 只有 RL+DFT (Step3c)，没有 ADMET
-          - Step3c+4a:   有 ADMET，但没有 PySCF
-          - Step3c+4a+4b:既有 ADMET，又有 PySCF 高精度结果
+        Label each molecule according to how far it progressed in the pipeline:
+          - Step3c_Only:     Only RL + DFT (Step 3C); no ADMET data
+          - Step3c+4a:       Has ADMET, but no PySCF high-accuracy DFT
+          - Step3c+4a+4b:    Has both ADMET and PySCF results
         """
         has_admet = pd.notna(row.get("Lipinski_Pass"))
         has_pyscf = pd.notna(row.get("PySCF_Gap_eV")) if "PySCF_Gap_eV" in row.index else False
@@ -168,57 +170,56 @@ def merge_all_steps():
 
     df_merge["Data_Source_Status"] = df_merge.apply(determine_data_source_status, axis=1)
 
-    # ============ 6. Filter_Status / Is_Final_Top：筛选标签 ============ #
+    # ============ 6. Filter_Status / Is_Final_Top ============ #
 
-    HERG_THRESHOLD = 0.5      # 与 Step4a 保持一致
-    PYS_CF_GAP_MIN = 4.0      # 可调：PySCF gap 合理下限 (eV)
-    PYS_CF_GAP_MAX = 7.0      # 可调：PySCF gap 合理上限 (eV)
+    HERG_THRESHOLD = 0.5      # Consistent with Step 4A
+    PYS_CF_GAP_MIN = 4.0      # Reasonable lower bound for PySCF gap (eV)
+    PYS_CF_GAP_MAX = 7.0      # Reasonable upper bound for PySCF gap (eV)
 
     def determine_filter_status(row: pd.Series) -> str:
         """
-        根据 ADMET + hERG + PySCF 等信息，给每个分子一个筛选标签：
-          - Fail_ADMET_Missing : 没有 ADMET 结果
-          - Fail_Lipinski      : Lipinski 规则不合格
-          - Fail_hERG_HighRisk : hERG 阻断概率过高
-          - Fail_PySCF_Gap     : 有 PySCF 结果但 gap 明显不在合理范围
-          - Pass               : 通过上述筛选
+        Assign a filter label to each molecule based on ADMET, hERG, and PySCF data:
+          - Fail_ADMET_Missing : No ADMET result available
+          - Fail_Lipinski      : Lipinski rules not satisfied
+          - Fail_hERG_HighRisk : hERG blockade probability exceeds threshold
+          - Fail_PySCF_Gap     : PySCF result present but gap is outside acceptable range
+          - Pass               : Passes all active filters
         """
         lip = row.get("Lipinski_Pass")
 
-        # 1) ADMET 缺失
+        # 1) ADMET data missing
         if pd.isna(lip):
             return "Fail_ADMET_Missing"
 
-        # 2) Lipinski 不通过
+        # 2) Lipinski not satisfied
         if lip is False:
             return "Fail_Lipinski"
 
-        # 3) hERG 高风险
+        # 3) hERG high risk
         if "hERG_Prob" in row.index and pd.notna(row["hERG_Prob"]):
             try:
                 hp = float(row["hERG_Prob"])
                 if hp >= HERG_THRESHOLD:
                     return "Fail_hERG_HighRisk"
             except Exception:
-                pass  # 解析失败则忽略，按无 hERG 数据处理
+                pass  # Parsing failure: treat as no hERG data
 
-        # 4) PySCF gap 检查（如果有数值）
+        # 4) PySCF gap check (if available)
         if "PySCF_Gap_eV" in row.index and pd.notna(row["PySCF_Gap_eV"]):
             try:
                 g = float(row["PySCF_Gap_eV"])
                 if not (PYS_CF_GAP_MIN <= g <= PYS_CF_GAP_MAX):
                     return "Fail_PySCF_Gap"
             except Exception:
-                # gap 转换失败就忽略 PySCF 这一条，只按 ADMET 通过处理
-                pass
+                pass  # Conversion failure: skip PySCF check, treat as ADMET-only pass
 
-        # 5) 其它情况视为通过
+        # 5) All checks passed
         return "Pass"
 
     df_merge["Filter_Status"] = df_merge.apply(determine_filter_status, axis=1)
     df_merge["Is_Final_Top"] = df_merge["Filter_Status"] == "Pass"
 
-    # ============ 7. 清理辅助列、整理列顺序 ============ #
+    # ============ 7. Clean auxiliary columns and order output columns ============ #
 
     if "merge_key" in df_merge.columns:
         df_merge.drop(columns=["merge_key"], inplace=True)
@@ -273,12 +274,12 @@ def merge_all_steps():
     df_master.to_csv(out_path, index=False)
 
     print("==============================================")
-    print(f"✅ Step4C Master Summary 已生成: {out_path}")
-    print(f"   分子总数: {len(df_master)}")
-    print(f"   Is_Final_Top=True 的条目数: {df_master['Is_Final_Top'].sum()}")
+    print(f"✅ Step 4C Master Summary generated: {out_path}")
+    print(f"   Total molecules: {len(df_master)}")
+    print(f"   Is_Final_Top=True count: {df_master['Is_Final_Top'].sum()}")
     print("==============================================")
 
-    print("\n[漏斗统计 - Filter_Status]")
+    print("\n[Funnel statistics - Filter_Status]")
     print(df_master["Filter_Status"].value_counts())
     print("==============================================")
 

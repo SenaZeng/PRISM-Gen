@@ -1,4 +1,4 @@
-# 文件: core/step4a_admet.py
+# File: core/step4a_admet.py
 import os
 import pandas as pd
 import numpy as np
@@ -6,22 +6,22 @@ from rdkit import Chem
 from rdkit.Chem import Descriptors, Lipinski, Crippen, QED
 from rdkit.Chem import AllChem, DataStructs
 
-import joblib  # 用于加载 hERG 预测模型
+import joblib  # For loading the hERG prediction model
 
-# 输入文件：Step 3C (xTB 物理重排后) 的结果
+# Input: Step 3C output (xTB physics-re-ranked results)
 INPUT_FILE = "../results/step3c_dft_refined.csv"
 OUTPUT_FILE = "../results/step4a_admet_final.csv"
 
-# hERG 模型位置（方案 A：放在 results 目录下）
+# hERG model location (placed in the results directory)
 HERG_MODEL_PATH = "../results/herg_model/herg_rf_model.pkl"
-HERG_THRESHOLD = 0.5  # hERG 高风险阈值，可调
+HERG_THRESHOLD = 0.5  # hERG high-risk probability threshold (adjustable)
 
 
-# ---------- hERG 相关工具函数 ---------- #
+# ---------- hERG utility functions ---------- #
 
 def smiles_to_fp(smi, radius=2, n_bits=2048):
     """
-    将 SMILES 转为 Morgan 指纹，用于 hERG 模型输入。
+    Convert a SMILES string to a Morgan fingerprint for hERG model input.
     """
     mol = Chem.MolFromSmiles(smi)
     if mol is None:
@@ -34,10 +34,10 @@ def smiles_to_fp(smi, radius=2, n_bits=2048):
 
 def predict_herg_risk(smiles, herg_model):
     """
-    使用预训练的 hERG 模型预测心脏毒性风险。
-    返回:
-        prob: 阻断 hERG 的预测概率 (float 或 None)
-        is_risk: 是否为高风险 (bool 或 None)
+    Predict cardiac toxicity risk using a pretrained hERG model.
+    Returns:
+        prob:    predicted probability of hERG channel blockade (float or None)
+        is_risk: whether the molecule is classified as high-risk (bool or None)
     """
     if herg_model is None:
         return None, None
@@ -48,26 +48,26 @@ def predict_herg_risk(smiles, herg_model):
     return float(proba), is_risk
 
 
-# ---------- ADMET 计算 ---------- #
+# ---------- ADMET property calculation ---------- #
 
 def calc_admet_props(smiles, herg_model=None):
     """
-    对单个分子计算基础 ADMET 属性：
-      - Lipinski 五规则相关 (MW, LogP, HBD, HBA, RotBonds)
+    Compute basic ADMET properties for a single molecule:
+      - Lipinski Rule of Five descriptors (MW, LogP, HBD, HBA, RotBonds)
       - TPSA
-      - QED (定量成药性，0~1)
-      - hERG 心脏毒性预测 (如果有模型)
+      - QED (quantitative estimate of drug-likeness, 0-1)
+      - hERG cardiac toxicity prediction (if model is available)
     """
     mol = Chem.MolFromSmiles(smiles)
     if not mol:
         return None
     
-    # 1. Lipinski 五规则指标
-    mw = Descriptors.MolWt(mol)        # 分子量 (<500)
-    logp = Crippen.MolLogP(mol)        # 脂溶性 (<5)
-    hbd = Lipinski.NumHDonors(mol)     # 氢键供体 (<5)
-    hba = Lipinski.NumHAcceptors(mol)  # 氢键受体 (<10)
-    rot_bonds = Lipinski.NumRotatableBonds(mol)  # 可旋转键 (<10)
+    # 1. Lipinski Rule of Five descriptors
+    mw = Descriptors.MolWt(mol)        # Molecular weight (< 500)
+    logp = Crippen.MolLogP(mol)        # Lipophilicity (< 5)
+    hbd = Lipinski.NumHDonors(mol)     # H-bond donors (< 5)
+    hba = Lipinski.NumHAcceptors(mol)  # H-bond acceptors (< 10)
+    rot_bonds = Lipinski.NumRotatableBonds(mol)  # Rotatable bonds (< 10)
     
     violations = 0
     if mw > 500:
@@ -80,12 +80,11 @@ def calc_admet_props(smiles, herg_model=None):
         violations += 1
     is_lipinski_pass = (violations <= 1)
 
-    # 2. 其他成药性指标
-    tpsa = Descriptors.TPSA(mol)       # 极性表面积 (透膜性, <140 Å²)
-    # QED: 定量成药性评分（0~1，越高越“药”）
-    qed_val = QED.qed(mol)
+    # 2. Additional drug-likeness descriptors
+    tpsa = Descriptors.TPSA(mol)       # Topological polar surface area (< 140 Å²)
+    qed_val = QED.qed(mol)             # Quantitative drug-likeness score (0-1, higher is better)
 
-    # 3. hERG 心脏毒性预测（AI 毒性筛查）
+    # 3. hERG cardiac toxicity prediction (AI-based safety screening)
     herg_prob, herg_risk = predict_herg_risk(smiles, herg_model)
 
     return {
@@ -98,8 +97,8 @@ def calc_admet_props(smiles, herg_model=None):
         "QED": round(qed_val, 3),
         "Lipinski_Pass": is_lipinski_pass,
         "Violations": int(violations),
-        "hERG_Prob": herg_prob,   # 0~1 概率
-        "hERG_Risk": herg_risk,   # True=高风险, False=低风险
+        "hERG_Prob": herg_prob,   # Probability in [0, 1]
+        "hERG_Risk": herg_risk,   # True = high risk, False = low risk
     }
 
 
@@ -108,32 +107,31 @@ def compute_r_admet_and_global(df_final,
                                alpha_safety=0.4,
                                beta=2.0):
     """
-    在已有 df_final 上增加：
-      - R_ADMET: 基于 Lipinski + (1 - hERG_Prob 或 QED) 的 ADMET 综合分
-      - R_global: 综合活性-物理-ADMET 分数
+    Append R_ADMET and R_global columns to df_final.
 
-    设计：
-      Lipinski_score = 1.0 (通过) or 0.0 (不通过/缺失)
+    Design:
+      Lipinski_score = 1.0 (pass) or 0.0 (fail / missing)
+
       safety_score:
-        - 优先使用 (1 - hERG_Prob), 范围截断到 [0,1]
-        - 如果没有 hERG_Prob，则退回使用 QED (0~1)
-        - 如果两者都没有，则给一个中性值 0.5
+        - Preferred: (1 - hERG_Prob), clipped to [0, 1]
+        - Fallback:  QED (0-1) if hERG_Prob is absent
+        - Default:   0.5 if both are missing
 
       R_ADMET = alpha_lip * Lipinski_score + alpha_safety * safety_score
 
       R_base:
-        - 优先使用 R_total (Step 3c 的活性+电子结构总分)
-        - 若不存在，则退回 Reward
-        - 若仍不存在，则视为 0
+        - Preferred: R_total (Step 3C composite score)
+        - Fallback:  Reward
+        - Default:   0.0
 
       R_global = R_base + beta * R_ADMET
     """
     def _row_score(row):
-        # Lipinski 部分
+        # Lipinski component
         lip_pass = row.get("Lipinski_Pass")
         lip_score = 1.0 if (lip_pass is True) else 0.0
 
-        # 安全性部分：hERG 优先，其次 QED
+        # Safety component: prefer hERG, fall back to QED
         safety_score = None
         if "hERG_Prob" in row.index and pd.notna(row["hERG_Prob"]):
             try:
@@ -142,7 +140,6 @@ def compute_r_admet_and_global(df_final,
                 safety_score = None
 
         if safety_score is None:
-            # 退回使用 QED（0~1）
             if "QED" in row.index and pd.notna(row["QED"]):
                 try:
                     safety_score = float(row["QED"])
@@ -150,14 +147,14 @@ def compute_r_admet_and_global(df_final,
                     safety_score = None
 
         if safety_score is None:
-            safety_score = 0.5  # 中性默认值
+            safety_score = 0.5  # Neutral default
 
-        # clamp 到 [0,1]
+        # Clip to [0, 1]
         safety_score = max(0.0, min(1.0, safety_score))
 
         r_admet = alpha_lip * lip_score + alpha_safety * safety_score
 
-        # 上游基准分
+        # Upstream base score
         if "R_total" in row.index and pd.notna(row["R_total"]):
             base = float(row["R_total"])
         elif "Reward" in row.index and pd.notna(row["Reward"]):
@@ -184,26 +181,26 @@ def main():
     herg_model_path = os.path.join(current_dir, HERG_MODEL_PATH)
 
     if not os.path.exists(in_path):
-        print(f"❌ 找不到输入文件: {in_path}")
+        print(f"❌ Input file not found: {in_path}")
         return
 
-    # 尝试加载 hERG 模型
+    # Attempt to load the hERG model
     herg_model = None
     if os.path.exists(herg_model_path):
-        print(f"🧪 加载 hERG 预测模型: {herg_model_path}")
+        print(f"🧪 Loading hERG prediction model: {herg_model_path}")
         try:
             herg_model = joblib.load(herg_model_path)
-            print("✅ hERG 模型加载成功，将启用 AI 心脏毒性筛查。")
+            print("✅ hERG model loaded. AI-based cardiac toxicity screening enabled.")
         except Exception as e:
-            print(f"⚠️ hERG 模型加载失败，将跳过 hERG 预测。错误信息: {e}")
+            print(f"⚠️ Failed to load hERG model; hERG prediction will be skipped. Error: {e}")
             herg_model = None
     else:
-        print(f"⚠️ 未找到 hERG 模型文件: {herg_model_path}，将跳过 hERG 预测。")
+        print(f"⚠️ hERG model file not found: {herg_model_path}. hERG prediction will be skipped.")
 
-    print(f"读取 Step3C 结果: {in_path}")
+    print(f"Reading Step 3C results: {in_path}")
     df = pd.read_csv(in_path)
     
-    print(f"开始计算 ADMET 属性 (共 {len(df)} 个分子)...")
+    print(f"Computing ADMET properties for {len(df)} molecules...")
 
     admet_data = []
     empty_admet = {
@@ -232,17 +229,17 @@ def main():
         else:
             admet_data.append(empty_admet.copy())
 
-    # 合并 ADMET 数据
+    # Merge ADMET data
     df_admet = pd.DataFrame(admet_data)
     df_final = pd.concat([df, df_admet], axis=1)
 
-    # === 新增：计算 R_ADMET 和 R_global ===
+    # Compute R_ADMET and R_global
     df_final = compute_r_admet_and_global(df_final)
 
-    # 先看 Lipinski 通过情况
+    # Lipinski pass statistics
     df_lipinski_pass = df_final[df_final["Lipinski_Pass"] == True].copy()
 
-    # 如果有 hERG 预测，再统计 hERG 情况
+    # hERG statistics (if prediction was run)
     if "hERG_Risk" in df_final.columns:
         df_herg_risk_true = df_final[df_final["hERG_Risk"] == True]
         df_lipinski_herg_pass = df_final[
@@ -253,12 +250,9 @@ def main():
         df_herg_risk_true = pd.DataFrame(columns=df_final.columns)
         df_lipinski_herg_pass = df_lipinski_pass.copy()
 
-    # 保存完整结果
-    # === Active_Set (ADMET Pass) ===
-    # 作为后续 Step4B/5A/5B 的统一起点：只要是 ADMET 通过，就标记为 True。
-    # 规则尽量与本脚本实际过滤口径一致：
-    #   Active_Set = Lipinski_Pass == True 且 ((hERG_Risk == False) 或缺失)
-    # 若只有 hERG_Prob，则使用 HERG_THRESHOLD 判定。
+    # === Compute Active_Set flag (ADMET Pass) ===
+    # Serves as the unified entry point for Steps 4B / 5A / 5B.
+    # Rule: Active_Set = True iff Lipinski_Pass == True AND hERG is not high-risk.
     if "Lipinski_Pass" in df_final.columns:
         lip_ok = (df_final["Lipinski_Pass"] == True)
     else:
@@ -273,26 +267,26 @@ def main():
 
     df_final["Active_Set"] = (lip_ok & herg_ok)
     try:
-        print(f"✅ Active_Set(ADMET Pass) count = {int(df_final['Active_Set'].sum())}")
+        print(f"✅ Active_Set (ADMET Pass) count = {int(df_final['Active_Set'].sum())}")
     except Exception:
         pass
 
     df_final.to_csv(out_path, index=False)
     
     print("-" * 30)
-    print(f"✅ ADMET 评估完成！结果已保存至: {out_path}")
-    print(f"📊 原始分子数: {len(df)}")
-    print(f"💊 符合 Lipinski 规则的分子数: {len(df_lipinski_pass)}")
+    print(f"✅ ADMET evaluation complete. Results saved to: {out_path}")
+    print(f"📊 Total molecules: {len(df)}")
+    print(f"💊 Molecules passing Lipinski rules: {len(df_lipinski_pass)}")
 
     if herg_model is not None:
-        print(f"❤️ 预测为 hERG 高风险的分子数: {len(df_herg_risk_true)}")
-        print(f"🛡️ 同时通过 Lipinski + hERG 筛查的分子数: {len(df_lipinski_herg_pass)}")
+        print(f"❤️ Molecules predicted as hERG high-risk: {len(df_herg_risk_true)}")
+        print(f"🛡️ Molecules passing both Lipinski and hERG screening: {len(df_lipinski_herg_pass)}")
     else:
-        print("⚠️ 未启用 hERG 预测，仅进行了 Lipinski 规则筛查。")
+        print("⚠️ hERG prediction was not enabled; only Lipinski filtering was applied.")
 
     print("-" * 30)
     
-    # 展示 Top 5 最终候选分子（按 R_global 优先，其次 R_total）
+    # Display top 5 final candidates (sorted by R_global, then R_total)
     if not df_lipinski_herg_pass.empty:
         df_for_top = df_lipinski_herg_pass.copy()
 
@@ -310,7 +304,7 @@ def main():
             if col in df_for_top.columns:
                 cols_to_show.append(col)
 
-        print("🏆 最终 Top 5 候选分子 (综合活性 + 电子稳定 + 成药性/安全性):")
+        print("🏆 Top 5 final candidates (composite activity + electronic stability + drug-likeness/safety):")
         print(df_for_top[cols_to_show].head(5))
 
 

@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 Step 5A (Patched - Ranking Friendly, No Tier Dependency)
---------------------------------------------------------
-功能（保持与原版一致）：
-- 从 step4c_master_summary.csv 中选 Top N 分子（默认按 R_global 优先）
-- 对每个分子对接到多种冠状病毒 Mpro
-- 解析每个靶点结合能，计算 Broad_Spectrum_Score
-- 输出 step5a_broadspectrum_docking.csv
-- 额外：在输出 CSV 中加入 Broad_Rank / Broad_Rank_Pct（按 Broad_Spectrum_Score 排名）
+---------------------------------------------------------
+Functionality (consistent with original version):
+- Select top-N molecules from step4c_master_summary.csv (default sort: R_global)
+- Dock each molecule against multiple coronavirus Mpro receptors
+- Parse per-target binding energies and compute Broad_Spectrum_Score
+- Write step5a_broadspectrum_docking.csv
+- Add Broad_Rank / Broad_Rank_Pct columns (ranked by Broad_Spectrum_Score)
 
-本补丁的关键改动：
-1) Broad_Spectrum_Score 计算更“诚实”：对所有靶点的有效数值都计入最差靶点（max），不再用 score<-0.1 的过滤。
-2) 输出自带排名列，便于 Step5B 直接按排名取 TopK，避免阈值分级导致“全灭”。
+Key changes in this patch:
+1) Broad_Spectrum_Score computed more faithfully: all finite values across
+   all targets contribute to the worst-target (max) score, without the
+   previous score < -0.1 pre-filter.
+2) Ranking columns are included in the output CSV so that Step 5B can take
+   the top-K directly by rank, avoiding empty output from strict tier thresholds.
 
-说明：本脚本不使用 Gold/Silver/Bronze；排名逻辑由分数自然给出 Top1/TopK。
+Note: this script does not use Gold/Silver/Bronze tiers. Ranking is determined
+naturally by the score, giving Top1 / TopK.
 """
 
 import os
@@ -31,7 +35,7 @@ import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-# ----------------- 路径基础设置 ----------------- #
+# ----------------- Base path setup ----------------- #
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, ".."))
 
@@ -40,7 +44,7 @@ DEFAULT_OUT_CSV = os.path.join(project_root, "results", "step5a_broadspectrum_do
 DEFAULT_RECEPTOR_DIR = os.path.join(project_root, "data", "receptors")
 
 
-# ----------------- Grid Box 配置（保持与你当前版本一致）----------------- #
+# ----------------- Grid box configuration (consistent with current version) ----------------- #
 TARGET_CONFIG: Dict[str, Dict[str, Any]] = {
     "SARS_CoV_2": {
         "file": "6W63_gast_clean.pdbqt",
@@ -57,29 +61,36 @@ TARGET_CONFIG: Dict[str, Dict[str, Any]] = {
 }
 
 
-
-# ===================== Stage2 Guardrails 配置块 =====================
-# 目标：在“代理模型 predE3 排序”之后，用少量可解释的理化闸门把明显掉队的结构类型挡在 docking 之外，
-#      以提升 TopN 的稳定性（尤其是避免出现 broad 尾巴分子）。
+# ===================== Stage 2 guardrails configuration =====================
+# Purpose: after predE3-based ranking, apply a small set of interpretable
+# physicochemical filters to remove structurally problematic molecules from
+# the docking queue, improving TopN stability (especially avoiding broad-tail
+# outliers).
 #
-# 你可以把它理解为：**不针对某一批分子调参**，而是固化“跨批次都成立”的结构常识。
+# These parameters encode cross-batch structural knowledge, not batch-specific tuning.
 #
-# 参数含义（大白话）：
-# - pool:         先从排序结果里取前 pool 个作为候选池（pool 越大，越不容易因为 ADMET/闸门过滤后不够 100 个）
-# - mw_min:       分子别太小；太小往往锚点不够、对接不稳（你这里经验上 260 是个安全下限）
-# - tpsa_min:     极性/氢键表面积下限；太低常见“抓不住口袋” → broad 尾巴（你已经验证 TPSA>=35 能显著剪尾巴）
-# - hba_min:      受体氢键受体数下限；HBA 太少（例如 1）容易出现 hard-negative（如 mol_95 类型）
-# - soft_tpsa_target:
-#                软目标：TPSA 低于该值时，不直接砍掉，而是给一点“排序惩罚”，把它往后排（默认 45）
-# - soft_logp_max:
-#                软目标：LogP 高于该值时给一点惩罚，避免过疏水导致 pose 不稳定/ADMET 边缘（默认 4.8）
+# Parameter definitions:
+# - pool:              Take the top `pool` rows from the ranked result as the
+#                      candidate pool (larger pool reduces risk of running short
+#                      after ADMET / gate filtering)
+# - mw_min:            Minimum molecular weight; too-small molecules often lack
+#                      sufficient anchor points for stable docking (empirical lower
+#                      bound: 260 Da)
+# - tpsa_min:          Minimum TPSA; very low TPSA correlates with poor pocket
+#                      occupancy and broad-tail scores (validated: TPSA >= 35 cuts tails)
+# - hba_min:           Minimum H-bond acceptor count; too few HBAs are associated
+#                      with hard-negative docking outcomes
+# - soft_tpsa_target:  Soft target: TPSA below this value incurs a ranking penalty
+#                      rather than hard exclusion (default: 45)
+# - soft_logp_max:     Soft target: LogP above this value incurs a ranking penalty
+#                      to reduce pose instability and ADMET edge cases (default: 4.8)
 # - penalty_tpsa / penalty_logp:
-#                惩罚强度（越大越“严格”）；一般不建议频繁改，除非你发现尾巴又回潮。
+#                      Penalty strength (larger = stricter); generally stable across batches
 #
-# 提供 3 个预设 profile：
-# - strict  : 更严格剪尾巴（更稳，但可能可用分子更少）
-# - balanced: 默认推荐（你目前验证最接近这个）
-# - loose   : 更宽松（适合你担心过滤后不够 100 个时）
+# Three preset profiles:
+# - strict  : tighter tail removal (more stable, fewer candidates)
+# - balanced: default recommendation
+# - loose   : relaxed (use when pool is too small after filtering)
 STAGE2_PROFILES = {
     "strict": {
         "pool": 1000,
@@ -115,19 +126,18 @@ STAGE2_PROFILES = {
 DEFAULT_STAGE2_PROFILE = "balanced"
 
 
-# ===================== predE3 代理模型训练配置块（轻量默认） =====================
-# 说明：这部分主要控制训练速度/稳定性。默认参数是“很快能跑完”的版本。
+# ===================== predE3 surrogate model training configuration =====================
+# Controls training speed and stability; default parameters are lightweight.
 PRED_E3_DEFAULT = {
-    "n_estimators": 300,   # 稳定后可升到 600/800
-    "cv_splits": 3,        # 稳定后可升到 5
+    "n_estimators": 300,   # Increase to 600-800 once training is stable
+    "cv_splits": 3,        # Increase to 5 once training is stable
     "min_samples_leaf": 2,
     "random_state": 0,
 }
 
 
 def resolve_receptor_path(receptor_dir: str, base_filename: str) -> Optional[str]:
-    """优先使用 *_gast_clean.pdbqt；否则回退到原文件名。"""
-    # 如果原本已经是 gast_clean，则直接使用
+    """Prefer *_gast_clean.pdbqt; fall back to the original filename if not found."""
     candidates: List[str] = []
     if base_filename.endswith("_gast_clean.pdbqt"):
         candidates.append(base_filename)
@@ -145,10 +155,11 @@ def resolve_receptor_path(receptor_dir: str, base_filename: str) -> Optional[str
 
 def pocket_center_from_pdbqt(rec_pdbqt: str, his_resi: int = 41, cys_resi: int = 145) -> Optional[Dict[str, float]]:
     """
-    从受体 PDBQT 解析 Mpro 口袋中心：取 His41(NE2/ND1) 与 Cys145(SG) 的中点。
-    - 不依赖 PDB 文件（直接用 pdbqt 内的残基/原子/坐标字段）
-    - 若 NE2 不存在，则尝试 ND1
-    返回: {"center_x":..., "center_y":..., "center_z":...} 或 None
+    Parse the Mpro binding pocket center from a receptor PDBQT file.
+    Center is computed as the midpoint between His41 (NE2 or ND1) and Cys145 (SG).
+    - Does not require a separate PDB file; coordinates are read directly from the PDBQT
+    - Falls back from NE2 to ND1 if NE2 is absent
+    Returns: {"center_x": ..., "center_y": ..., "center_z": ...} or None
     """
     his_resnames = {"HIS", "HIE", "HID", "HIP"}
     hx = hy = hz = None
@@ -164,7 +175,7 @@ def pocket_center_from_pdbqt(rec_pdbqt: str, his_resi: int = 41, cys_resi: int =
                     if not (ln.startswith("ATOM") or ln.startswith("HETATM")):
                         continue
                     parts = ln.split()
-                    # 期望格式：ATOM serial atom res chain resi x y z ...
+                    # Expected format: ATOM serial atom resname chain resi x y z ...
                     if len(parts) < 9:
                         continue
                     atom = parts[2]
@@ -204,7 +215,7 @@ def pocket_center_from_pdbqt(rec_pdbqt: str, his_resi: int = 41, cys_resi: int =
 
 
 def build_resolved_target_config(receptor_dir: str) -> Dict[str, Dict[str, Any]]:
-    """构建一个“可直接用于 docking”的 TARGET_CONFIG 副本：解析受体路径 + 自动口袋中心。"""
+    """Build a TARGET_CONFIG copy with resolved receptor paths and auto-computed pocket centers."""
     resolved: Dict[str, Dict[str, Any]] = {}
     for virus, conf in TARGET_CONFIG.items():
         base_file = conf["file"]
@@ -212,22 +223,22 @@ def build_resolved_target_config(receptor_dir: str) -> Dict[str, Dict[str, Any]]
 
         box = dict(conf["box"])  # copy
         if rec_path is None:
-            print(f"⚠️ 受体缺失: {virus} | 期望 {base_file} 或 *_gast_clean.pdbqt")
+            print(f"⚠️ Receptor missing: {virus} | expected {base_file} or *_gast_clean.pdbqt")
             resolved[virus] = {"path": None, "box": box, "file": base_file}
             continue
 
-        # 自动计算口袋中心；失败则回退配置中心
+        # Auto-compute pocket center from His41/Cys145; fall back to config center on failure
         cen = pocket_center_from_pdbqt(rec_path)
         if cen is not None:
             box.update(cen)
             print(
-                f"🧭 {virus} box center(auto His41/Cys145) = "
+                f"🧭 {virus} box center (auto His41/Cys145) = "
                 f"({box['center_x']:.3f}, {box['center_y']:.3f}, {box['center_z']:.3f}) "
                 f"| receptor={os.path.basename(rec_path)}"
             )
         else:
             print(
-                f"⚠️ {virus} 无法从受体解析 His41/Cys145（保持配置中心）"
+                f"⚠️ {virus}: could not parse His41/Cys145 from receptor; using config center"
                 f" | receptor={os.path.basename(rec_path)}"
             )
 
@@ -243,7 +254,7 @@ def choose_sort_col(df: pd.DataFrame, preferred: List[str]) -> Optional[str]:
 
 
 def smiles_to_3d_pdb(smiles: str, out_pdb: str) -> bool:
-    """RDKit 生成 3D PDB"""
+    """Generate a 3D PDB structure from a SMILES string using RDKit."""
     try:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
@@ -266,8 +277,8 @@ def run_cmd(cmd: List[str]) -> subprocess.CompletedProcess:
 
 def pdb_to_pdbqt_with_obabel(in_pdb: str, out_pdbqt: str) -> bool:
     """
-    用 obabel 转 PDBQT（保持你原脚本的“pH 7.4 质子化”思路）
-    需要系统安装 OpenBabel（obabel）
+    Convert PDB to PDBQT using OpenBabel with pH 7.4 protonation.
+    Requires OpenBabel (obabel) to be installed on the system.
     """
     try:
         cmd = ["obabel", in_pdb, "-O", out_pdbqt, "--partialcharge", "gasteiger", "-p", "7.4"]
@@ -279,8 +290,9 @@ def pdb_to_pdbqt_with_obabel(in_pdb: str, out_pdbqt: str) -> bool:
 
 def run_single_docking(lig_pdbqt: str, rec_pdbqt: str, box: Dict[str, float], cpu_per_task: int = 1) -> float:
     """
-    调用 vina，返回 best affinity（kcal/mol）
-    需要系统安装 vina
+    Run AutoDock Vina for a single ligand-receptor pair.
+    Returns the best affinity (kcal/mol).
+    Requires Vina to be installed on the system.
     """
     out_pdbqt = lig_pdbqt.replace(".pdbqt", f"_out_{os.path.basename(rec_pdbqt)}")
     log_txt = lig_pdbqt.replace(".pdbqt", f"_{os.path.basename(rec_pdbqt)}.log")
@@ -306,16 +318,14 @@ def run_single_docking(lig_pdbqt: str, rec_pdbqt: str, box: Dict[str, float], cp
     if res.returncode != 0:
         return np.nan
 
-    # 从 log 中解析 affinity
+    # Parse best affinity from Vina log
     try:
         with open(log_txt, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.read().splitlines()
-        # vina log 中通常有表格，第一条 mode 的 affinity 在某行
-        # 这里做一个稳健解析：找包含 "1 " 且有浮点数的行
+        # The first mode affinity appears on a line starting with "1 "
         for ln in lines:
             if ln.strip().startswith("1 "):
                 parts = ln.split()
-                # parts[1] 通常是 affinity
                 return float(parts[1])
     except Exception:
         pass
@@ -345,7 +355,7 @@ def process_one_molecule(row: pd.Series, target_conf: Dict[str, Dict[str, Any]],
     if not pdb_to_pdbqt_with_obabel(lig_pdb, lig_pdbqt):
         return None
 
-    # 3) 对接到多个靶点
+    # 3) Dock against each target
     rec_scores: Dict[str, float] = {}
     finite_scores: List[float] = []
 
@@ -365,7 +375,7 @@ def process_one_molecule(row: pd.Series, target_conf: Dict[str, Dict[str, Any]],
         if score is not None and np.isfinite(score):
             finite_scores.append(float(score))
 
-    # 4) Broad_Spectrum_Score：取“最差靶点”（max，越负越好）
+    # 4) Broad_Spectrum_Score: worst-target score (max; more negative is better)
     if not finite_scores:
         broad_score = np.nan
     else:
@@ -377,12 +387,12 @@ def process_one_molecule(row: pd.Series, target_conf: Dict[str, Dict[str, Any]],
         "Broad_Spectrum_Score": broad_score,
     }
 
-    # 5) 回填上游信息（如果存在）
+    # 5) Carry forward upstream metadata if available
     for key in ["pIC50", "Reward", "R_total2", "R_total", "R_ADMET", "R_global"]:
         if key in row.index:
             record[key] = row[key]
 
-    # 6) 各靶点分数
+    # 6) Per-target scores
     for virus, sc in rec_scores.items():
         record[f"E_{virus}"] = sc
 
@@ -397,13 +407,13 @@ def compute_rank_pct(scores: pd.Series) -> pd.Series:
     return rank / float(n)
 
 
-# ===================== predE3 + Stage2 自动排序/过滤 =====================
+# ===================== predE3 + Stage2 auto-ranking / filtering =====================
 def _load_docking_labels(dock_csv_glob: str) -> pd.DataFrame:
-    '''
-    读取历史 docking 结果作为监督标签。
-    期望列：smiles, E_SARS_CoV_2, E_SARS_CoV_1, E_MERS_CoV, Broad_Spectrum_Score
-    同一个 smiles 多次出现时，保留 Broad_Spectrum_Score 最好的（最负的那条）。
-    '''
+    """
+    Load historical docking results as supervised labels.
+    Expected columns: smiles, E_SARS_CoV_2, E_SARS_CoV_1, E_MERS_CoV, Broad_Spectrum_Score
+    When a SMILES appears multiple times, keep the row with the best Broad_Spectrum_Score (most negative).
+    """
     import glob
 
     need = ["smiles", "E_SARS_CoV_2", "E_SARS_CoV_1", "E_MERS_CoV", "Broad_Spectrum_Score"]
@@ -430,10 +440,10 @@ def _train_predE3_and_rank(step4c_df: pd.DataFrame,
                           n_jobs: int,
                           min_samples_leaf: int = 2,
                           random_state: int = 0) -> pd.DataFrame:
-    '''
-    训练多输出 RF：同时预测三个靶点能量。
-    返回带 pred_* 列、并按 pred_broad（越小越好）排序的 df。
-    '''
+    """
+    Train a multi-output RandomForest to predict binding energies for all three targets simultaneously.
+    Returns the input df augmented with pred_* columns, sorted by pred_broad (ascending = better).
+    """
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.model_selection import KFold
 
@@ -444,7 +454,7 @@ def _train_predE3_and_rank(step4c_df: pd.DataFrame,
     if len(m) < 50:
         raise RuntimeError(f"Too few labeled rows to train predE3: {len(m)}")
 
-    # 用 step4c 的数值列做特征；剔除明显“标签/状态/奖励”列
+    # Use numeric Step 4C columns as features; exclude obvious label/status/reward columns
     drop_cols = set([
         "Reward", "R_total", "R_global", "R_total2",
         "Is_Final_Top", "Filter_Status", "Active_Set", "Data_Source_Status",
@@ -457,7 +467,7 @@ def _train_predE3_and_rank(step4c_df: pd.DataFrame,
     X = X.fillna(X.median(numeric_only=True))
     Y = m[["E_SARS_CoV_2", "E_SARS_CoV_1", "E_MERS_CoV"]].astype(float)
 
-    # 轻量 CV（主要 sanity check）
+    # Lightweight cross-validation (sanity check only)
     kf = KFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
     maes = []
     for tr, te in kf.split(X):
@@ -470,9 +480,9 @@ def _train_predE3_and_rank(step4c_df: pd.DataFrame,
         model.fit(X.iloc[tr], Y.iloc[tr])
         pred = model.predict(X.iloc[te])
         maes.append(float(np.mean(np.abs(pred - Y.iloc[te].values))))
-    print(f"[predE3] CV MAE(mean over 3 targets) = {np.mean(maes):.3f} ± {np.std(maes):.3f}")
+    print(f"[predE3] CV MAE (mean over 3 targets) = {np.mean(maes):.3f} ± {np.std(maes):.3f}")
 
-    # 全量训练
+    # Full-data training
     model = RandomForestRegressor(
         n_estimators=n_estimators,
         random_state=random_state,
@@ -481,7 +491,7 @@ def _train_predE3_and_rank(step4c_df: pd.DataFrame,
     )
     model.fit(X, Y)
 
-    # 全量预测
+    # Full-data prediction
     X_all = step4c_df[feat_cols].replace([np.inf, -np.inf], np.nan)
     X_all = X_all.fillna(X_all.median(numeric_only=True))
     pred_all = model.predict(X_all)
@@ -492,7 +502,7 @@ def _train_predE3_and_rank(step4c_df: pd.DataFrame,
     df_out["pred_E_MERS_CoV"] = pred_all[:, 2]
     df_out["pred_broad"] = df_out[["pred_E_SARS_CoV_2", "pred_E_SARS_CoV_1", "pred_E_MERS_CoV"]].max(axis=1)
 
-    # 兼容 step5a 的 TopN 选择：把 R_global 临时替换为 -pred_broad（越大越好）
+    # For compatibility with Step 5A TopN selection: temporarily replace R_global with -pred_broad
     if "R_global" in df_out.columns:
         df_out["R_global_bak_predE3"] = df_out["R_global"]
     df_out["R_global"] = -df_out["pred_broad"]
@@ -506,20 +516,16 @@ def _apply_stage2_guardrails(
     use_strict_gate: bool,
     rphys_min: float
 ) -> pd.DataFrame:
-
-    '''
-    Stage2：在“排序后”再过滤/重排（避免 hard-negative 尾巴）。
-    - 先按 step5a 逻辑保持 Active_Set==True（如果有）
-    - 取前 pool
-    - 硬闸门：MW/TPSA/HBA
-    - 软惩罚：TPSA 低于 soft_tpsa_target、LogP 高于 soft_logp_max
-    '''
+    """
+    Stage 2: post-ranking filtering and re-ordering to remove hard-negative tail molecules.
+    - Apply the same Active_Set / Is_Final_Top / strict gate logic as main()
+    - Take the top `pool` rows
+    - Hard gates: MW / TPSA / HBA
+    - Soft penalties: TPSA below soft_tpsa_target, LogP above soft_logp_max
+    """
     df = df_ranked.copy()
 
-    
-    # 与 main() 逻辑保持一致：只有开启 --use_strict_gate 才启用严格门槛
-    if use_strict_gate and all(c in df.columns for c in ["Data_Source_Status", "Physical_HardFail", "R_phys"
-    ]):
+    if use_strict_gate and all(c in df.columns for c in ["Data_Source_Status", "Physical_HardFail", "R_phys"]):
         df = df[
             (df["Data_Source_Status"] == "Step3c+4a+4b") &
             (df["Physical_HardFail"] == False) &
@@ -533,12 +539,12 @@ def _apply_stage2_guardrails(
     pool = int(cfg["pool"])
     df = df.head(pool).copy()
 
-    # 硬闸门
+    # Hard gates
     df = df[(df["MW"] >= float(cfg["mw_min"])) &
             (df["TPSA"] >= float(cfg["tpsa_min"])) &
             (df["HBA"] >= int(cfg["hba_min"]))].copy()
 
-    # 软惩罚（只影响排序）
+    # Soft penalties (affect ranking only, not hard exclusion)
     tpsa = df["TPSA"].astype(float)
     logp = df["LogP"].astype(float) if "LogP" in df.columns else pd.Series(np.zeros(len(df)), index=df.index)
 
@@ -555,103 +561,109 @@ def _apply_stage2_guardrails(
     df = df.sort_values("R_global", ascending=False)
     return df
 
+
 def save_top_n_structures(df_results, tmp_root, top_n=20):
     """
-    保存 Top N 分子的自由态与对接态结构（匹配当前脚本实际生成的文件名）
+    Extract and save free-ligand and docked poses for the top-N molecules.
     """
     save_dir = os.path.join(project_root, "results", "step5a_top_structures")
     if os.path.exists(save_dir):
         shutil.rmtree(save_dir)
     os.makedirs(save_dir, exist_ok=True)
 
-    # Broad_Spectrum_Score 越负越好（升序）
+    # Sort ascending: more negative Broad_Spectrum_Score is better
     df_top = df_results.sort_values("Broad_Spectrum_Score", ascending=True).head(top_n)
 
-    print(f"\n>>> 正在提取 Top {top_n} 分子的 3D 结构...")
+    print(f"\n>>> Extracting 3D structures for top {top_n} molecules...")
     for _, row in df_top.iterrows():
         mol_name = str(row["name"])
         mol_src_dir = os.path.join(tmp_root, mol_name)
         mol_dst_dir = os.path.join(save_dir, mol_name)
         os.makedirs(mol_dst_dir, exist_ok=True)
 
-        # 1) 自由态 ligand：实际是 {name}.pdbqt
+        # 1) Free ligand: {name}.pdbqt
         lig = os.path.join(mol_src_dir, f"{mol_name}.pdbqt")
         if os.path.exists(lig):
             shutil.copy(lig, os.path.join(mol_dst_dir, f"{mol_name}_free_ligand.pdbqt"))
 
-        # 2) 对接态：实际是 {name}_out_*.pdbqt
+        # 2) Docked poses: {name}_out_*.pdbqt
         for p in glob.glob(os.path.join(mol_src_dir, f"{mol_name}_out_*.pdbqt")):
             shutil.copy(p, os.path.join(mol_dst_dir, os.path.basename(p)))
 
-    print(f"✅ 结构已保存至: {save_dir}")
-
+    print(f"✅ Structures saved to: {save_dir}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Step 5A: Broad-Spectrum Docking (Ranking-friendly)")
     parser.add_argument("--use_strict_gate", action="store_true",
-                help="使用严格MD门槛筛选：必须有PySCF且Physical_HardFail=False且R_phys>=阈值")
+                help="Apply strict gate: require PySCF data, Physical_HardFail=False, and R_phys >= threshold")
     parser.add_argument("--rphys_min", type=float, default=0.85,
-                help="严格门槛的 R_phys 下限（默认 0.85；可改 0.80）")
+                help="R_phys lower bound for strict gate (default: 0.85)")
     
-    parser.add_argument("--input_csv", type=str, default=DEFAULT_INPUT_CSV, help=f"输入 Step4C 总表 (默认: {DEFAULT_INPUT_CSV})")
-    parser.add_argument("--out_csv", type=str, default=DEFAULT_OUT_CSV, help=f"输出 docking 结果 CSV (默认: {DEFAULT_OUT_CSV})")
-    parser.add_argument("--receptor_dir", type=str, default=DEFAULT_RECEPTOR_DIR, help=f"受体 pdbqt 所在目录 (默认: {DEFAULT_RECEPTOR_DIR})")
-    parser.add_argument("--top_n", type=int, default=20, help="从 Step4C 中选前 top_n 个分子做 docking (默认: 20)")
+    parser.add_argument("--input_csv", type=str, default=DEFAULT_INPUT_CSV,
+                        help=f"Input Step 4C master summary (default: {DEFAULT_INPUT_CSV})")
+    parser.add_argument("--out_csv", type=str, default=DEFAULT_OUT_CSV,
+                        help=f"Output docking results CSV (default: {DEFAULT_OUT_CSV})")
+    parser.add_argument("--receptor_dir", type=str, default=DEFAULT_RECEPTOR_DIR,
+                        help=f"Directory containing receptor PDBQT files (default: {DEFAULT_RECEPTOR_DIR})")
+    parser.add_argument("--top_n", type=int, default=20,
+                        help="Number of molecules from Step 4C to dock (default: 20)")
     
-    parser.add_argument("--workers", type=int, default=4, help="并行处理的分子数 (默认: 4)")
-    parser.add_argument("--vina_cpu", type=int, default=1, help="每个 Vina 进程使用的 CPU 数 (默认: 1)")
-    # --- 固化模式：predE3 代理排序 + Stage2 guardrails（可选启用） ---
+    parser.add_argument("--workers", type=int, default=4,
+                        help="Number of parallel molecule workers (default: 4)")
+    parser.add_argument("--vina_cpu", type=int, default=1,
+                        help="Number of CPU cores per Vina process (default: 1)")
     parser.add_argument("--auto_predE3_stage2", action="store_true",
-                        help="启用：自动用历史 docking 训练 predE3，并执行 Stage2 guardrails 后再 dock（推荐）")
+                        help="Enable: train predE3 from historical docking labels, apply Stage2 guardrails, then dock (recommended)")
     parser.add_argument("--step4c_csv", type=str, default=None,
-                        help="Step4C master csv（不填则沿用 --input_csv）")
-    parser.add_argument("--dock_csv_glob", type=str, default=os.path.join(project_root, "results", "step5a_broadspectrum_docking*.csv"),
-                        help="历史 docking 结果 glob，用于训练 predE3（默认: results/step5a_broadspectrum_docking*.csv）")
+                        help="Step 4C master CSV (defaults to --input_csv if not set)")
+    parser.add_argument("--dock_csv_glob", type=str,
+                        default=os.path.join(project_root, "results", "step5a_broadspectrum_docking*.csv"),
+                        help="Glob pattern for historical docking CSVs used to train predE3 (default: results/step5a_broadspectrum_docking*.csv)")
 
-    # predE3 训练参数（默认轻量快速）
+    # predE3 training parameters (lightweight defaults)
     parser.add_argument("--predE3_n_estimators", type=int, default=PRED_E3_DEFAULT["n_estimators"])
     parser.add_argument("--predE3_cv_splits", type=int, default=PRED_E3_DEFAULT["cv_splits"])
-    parser.add_argument("--predE3_n_jobs", type=int, default=40, help="predE3 训练用并行核数（建议<=CPU配额）")
+    parser.add_argument("--predE3_n_jobs", type=int, default=40,
+                        help="Parallel cores for predE3 training (recommended: <= CPU quota)")
 
-    # Stage2 参数：优先使用 profile，再用单项参数覆盖
-    parser.add_argument("--stage2_profile", type=str, default=DEFAULT_STAGE2_PROFILE, choices=list(STAGE2_PROFILES.keys()),
-                        help="Stage2 预设：strict/balanced/loose（默认 balanced）")
-    parser.add_argument("--stage2_pool", type=int, default=None, help="覆盖 profile.pool（不填则用 profile 默认）")
-    parser.add_argument("--stage2_mw_min", type=float, default=None, help="覆盖 profile.mw_min")
-    parser.add_argument("--stage2_tpsa_min", type=float, default=None, help="覆盖 profile.tpsa_min")
-    parser.add_argument("--stage2_hba_min", type=int, default=None, help="覆盖 profile.hba_min")
-    parser.add_argument("--stage2_soft_tpsa_target", type=float, default=None, help="覆盖 profile.soft_tpsa_target")
-    parser.add_argument("--stage2_soft_logp_max", type=float, default=None, help="覆盖 profile.soft_logp_max")
-    parser.add_argument("--stage2_penalty_tpsa", type=float, default=None, help="覆盖 profile.penalty_tpsa")
-    parser.add_argument("--stage2_penalty_logp", type=float, default=None, help="覆盖 profile.penalty_logp")
+    # Stage2 parameters: profile first, then individual overrides
+    parser.add_argument("--stage2_profile", type=str, default=DEFAULT_STAGE2_PROFILE,
+                        choices=list(STAGE2_PROFILES.keys()),
+                        help="Stage2 preset: strict / balanced / loose (default: balanced)")
+    parser.add_argument("--stage2_pool", type=int, default=None, help="Override profile.pool")
+    parser.add_argument("--stage2_mw_min", type=float, default=None, help="Override profile.mw_min")
+    parser.add_argument("--stage2_tpsa_min", type=float, default=None, help="Override profile.tpsa_min")
+    parser.add_argument("--stage2_hba_min", type=int, default=None, help="Override profile.hba_min")
+    parser.add_argument("--stage2_soft_tpsa_target", type=float, default=None, help="Override profile.soft_tpsa_target")
+    parser.add_argument("--stage2_soft_logp_max", type=float, default=None, help="Override profile.soft_logp_max")
+    parser.add_argument("--stage2_penalty_tpsa", type=float, default=None, help="Override profile.penalty_tpsa")
+    parser.add_argument("--stage2_penalty_logp", type=float, default=None, help="Override profile.penalty_logp")
 
-    # === 在这里插入您新增的参数 ===
-    parser.add_argument("--save_top_structures", action="store_true", default=True, 
-                        help="是否提取并保存 Top N 分子的 3D 结构文件")
-    parser.add_argument("--top_n_save", type=int, default=20, 
-                        help="指定保存前多少个分子的结构")
+    parser.add_argument("--save_top_structures", action="store_true", default=True,
+                        help="Extract and save 3D structure files for the top-N molecules")
+    parser.add_argument("--top_n_save", type=int, default=20,
+                        help="Number of top molecules whose structures are saved")
 
     parser.add_argument("--write_intermediate_csv", action="store_true",
-                        help="在 auto_predE3_stage2 下，写出 results/step4c_master_summary_SORTBY_predE3*.csv 以便复现")
+                        help="Under auto_predE3_stage2, write results/step4c_master_summary_SORTBY_predE3*.csv for reproducibility")
     parser.add_argument("--no_write_intermediate_csv", action="store_true",
-                        help="在 auto_predE3_stage2 下，不写中间 CSV（默认会写）")
+                        help="Under auto_predE3_stage2, suppress intermediate CSV output (default: write)")
     args = parser.parse_args()
 
-    # ----------------- 读取 Step4C 总表 ----------------- #
+    # ----------------- Read Step 4C master summary ----------------- #
     step4c_csv = args.step4c_csv or args.input_csv
     if not os.path.exists(step4c_csv):
-        raise FileNotFoundError(f"找不到输入: {step4c_csv}")
+        raise FileNotFoundError(f"Input not found: {step4c_csv}")
     df4 = pd.read_csv(step4c_csv)
     if df4.empty:
-        print("⚠️ Step4C 输入为空，退出。")
+        print("⚠️ Step 4C input is empty; exiting.")
         return
 
-    # ----------------- 可选：自动 predE3 排序 + Stage2 guardrails ----------------- #
+    # ----------------- Optional: auto predE3 ranking + Stage2 guardrails ----------------- #
     if args.auto_predE3_stage2:
-        # 1) 组装 Stage2 配置（profile + override）
+        # 1) Build Stage2 config (profile + overrides)
         cfg = STAGE2_PROFILES.get(args.stage2_profile, STAGE2_PROFILES[DEFAULT_STAGE2_PROFILE]).copy()
-        # overrides
         if args.stage2_pool is not None: cfg["pool"] = args.stage2_pool
         if args.stage2_mw_min is not None: cfg["mw_min"] = args.stage2_mw_min
         if args.stage2_tpsa_min is not None: cfg["tpsa_min"] = args.stage2_tpsa_min
@@ -663,12 +675,12 @@ def main():
 
         print(f"🧠 auto_predE3_stage2=ON | stage2_profile={args.stage2_profile} | cfg={cfg}")
 
-        # 2) 读取历史 docking 标签
+        # 2) Load historical docking labels
         dock_labels = _load_docking_labels(args.dock_csv_glob)
-        print(f"🧪 predE3 labels loaded: {len(dock_labels)} unique smiles (glob={args.dock_csv_glob})")
+        print(f"🧪 predE3 labels loaded: {len(dock_labels)} unique SMILES (glob={args.dock_csv_glob})")
 
         try:
-            # 3) predE3 排序
+            # 3) predE3 ranking
             df_ranked = _train_predE3_and_rank(
                 step4c_df=df4,
                 dock_labels=dock_labels,
@@ -687,49 +699,48 @@ def main():
                 rphys_min=float(args.rphys_min)
             )
 
-            # 5) 可选：写中间 CSV（默认写，除非显式 --no_write_intermediate_csv）
+            # 5) Optionally write intermediate CSVs (default: write; suppress with --no_write_intermediate_csv)
             do_write = (not args.no_write_intermediate_csv) or args.write_intermediate_csv
             if do_write:
                 out1 = os.path.join(project_root, "results", "step4c_master_summary_SORTBY_predE3.csv")
                 out2 = os.path.join(project_root, "results", "step4c_master_summary_SORTBY_predE3_stage2.csv")
                 df_ranked.to_csv(out1, index=False)
                 df.to_csv(out2, index=False)
-                print(f"📝 wrote intermediates: {out1} | {out2}")
+                print(f"📝 Intermediate CSVs written: {out1} | {out2}")
 
-            print(f"🧱 Stage2 kept rows: {len(df)} (after ADMET+pool+MW/TPSA/HBA + soft-penalty reorder)")
+            print(f"🧱 Stage2 retained rows: {len(df)} (after ADMET + pool + MW/TPSA/HBA + soft-penalty reorder)")
             if df.empty:
-                print("⚠️ Stage2 过滤后为空；回退到原始排序（R_global）。")
+                print("⚠️ Stage2 filtering produced empty result; falling back to original R_global ranking.")
                 df = df4.copy()
 
         except Exception as e:
-            print(f"⚠️ auto_predE3_stage2 failed ({e}); fallback to original ranking (R_global).")
+            print(f"⚠️ auto_predE3_stage2 failed ({e}); falling back to original ranking (R_global).")
             df = df4.copy()
     else:
         df = df4.copy()
 
-    # === 决赛名单筛选 (物理否决权核心) ===
-    # 优先使用 Is_Final_Top，确保只有通过 DFT 终审且符合物理/药代标准的分子进入对接
-    # 1) 入口筛选：严格门槛优先（得到 36），否则回退 Is_Final_Top / Active_Set
+    # === Final candidate gate (physical veto) ===
+    # Apply in order: strict DFT gate > Is_Final_Top > Active_Set
     if args.use_strict_gate and all(c in df.columns for c in ["Data_Source_Status", "Physical_HardFail", "R_phys"]):
         df = df[
             (df["Data_Source_Status"] == "Step3c+4a+4b") &
             (df["Physical_HardFail"] == False) &
             (df["R_phys"] >= float(args.rphys_min))
         ].copy()
-        print(f"✅ 严格门槛生效：仅对通过 PySCF+DFT 且 R_phys>={args.rphys_min} 的 {len(df)} 个分子 docking。")
+        print(f"✅ Strict gate applied: {len(df)} molecules passed PySCF/DFT + R_phys >= {args.rphys_min} for docking.")
 
     elif "Is_Final_Top" in df.columns:
         df = df[df["Is_Final_Top"] == True].copy()
-        print(f"✅ 使用 Is_Final_Top：{len(df)} 个分子 docking。")
+        print(f"✅ Using Is_Final_Top: {len(df)} molecules for docking.")
 
     elif "Active_Set" in df.columns:
         df = df[(df["Active_Set"] == True) | (df["Active_Set"] == 1)].copy()
-        print(f"✅ 使用 Active_Set：{len(df)} 个分子 docking。")
+        print(f"✅ Using Active_Set: {len(df)} molecules for docking.")
         if df.empty:
-            print("⚠️ Active_Set 筛选后为空，退出。")
+            print("⚠️ Active_Set filtering produced empty result; exiting.")
             return
 
-    # 选择 TopN（这里仍保留 TopN：docking 成本太高；你也可以把 top_n 改大）
+    # Select TopN (docking is expensive; top_n limits the queue)
     preferred = ["R_global2", "R_total2", "R_total", "R_global", "Reward", "pIC50"]
     sort_col = choose_sort_col(df, preferred)
     
@@ -743,9 +754,9 @@ def main():
     if "name" not in df_top.columns:
         df_top.insert(0, "name", [f"mol_{i}" for i in range(len(df_top))])
 
-    print(f"📥 输入分子数: {len(df)} | 选择 docking TopN={len(df_top)} | sort_by={sort_col}")
+    print(f"📥 Input molecules: {len(df)} | Docking TopN={len(df_top)} | sort_by={sort_col}")
 
-    # 受体优先使用 *_gast_clean.pdbqt，并自动按 His41/Cys145 计算 box center
+    # Prefer *_gast_clean.pdbqt receptors and auto-compute box centers from His41/Cys145
     resolved_targets = build_resolved_target_config(args.receptor_dir)
 
     tmp_root = tempfile.mkdtemp(prefix="step5a_docking_")
@@ -767,38 +778,33 @@ def main():
                 bs_str = f"{bs:.2f}" if bs is not None and np.isfinite(bs) else "NaN"
                 print(f"[{done_cnt}/{total}] {res.get('name','')} BroadScore={bs_str}")
             else:
-                print(f"[{done_cnt}/{total}] 该分子处理失败")
+                print(f"[{done_cnt}/{total}] Molecule processing failed")
 
-    # --- 插入点：在清理 tmp 之前提取结构 ---
-    # 先检查有没有结果
+    # Extract structures before cleaning up the temp directory
     if not results:
-        print("⚠️ 没有任何成功的 docking 结果，未生成输出文件")
-        # 可选：失败时也清理 tmp
+        print("⚠️ No successful docking results; output file not generated")
         try:
             shutil.rmtree(tmp_root)
         except Exception:
             pass
         return
 
-    # 先创建 df_res（关键：后面保存结构/排名/保存CSV都依赖它）
     df_res = pd.DataFrame(results)
 
-    # --- 在清理 tmp 之前提取结构（此时 df_res 已存在） ---
     if args.save_top_structures:
         save_top_n_structures(df_res, tmp_root, top_n=args.top_n_save)
 
-    # 清理临时目录（可按需要保留）
+    # Clean up temporary directory
     try:
         shutil.rmtree(tmp_root)
     except Exception:
         pass
 
-
-    # 生成排名列（越负越好 -> 升序）
+    # Generate ranking columns (lower Broad_Spectrum_Score is better -> ascending)
     df_res["Broad_Rank"] = df_res["Broad_Spectrum_Score"].rank(method="min", ascending=True)
     df_res["Broad_Rank_Pct"] = compute_rank_pct(df_res["Broad_Spectrum_Score"])
 
-    # 整理列顺序
+    # Arrange columns: fixed base columns first, then extras
     base_cols = ["name", "smiles", "Broad_Spectrum_Score", "Broad_Rank", "Broad_Rank_Pct",
                  "E_SARS_CoV_2", "E_SARS_CoV_1", "E_MERS_CoV"]
     extra_cols = [c for c in df_res.columns if c not in base_cols]
@@ -808,8 +814,8 @@ def main():
     df_res.to_csv(args.out_csv, index=False)
 
     print("\n========================================")
-    print(f"✅ 广谱对接完成，结果已保存: {args.out_csv}")
-    print(f"   docking 分子数: {len(df_res)}")
+    print(f"✅ Broad-spectrum docking complete. Results saved to: {args.out_csv}")
+    print(f"   Molecules docked: {len(df_res)}")
     if df_res["Broad_Spectrum_Score"].notna().any():
         s = df_res["Broad_Spectrum_Score"].dropna()
         print(f"   Broad_Spectrum_Score: min={s.min():.3f} mean={s.mean():.3f} max={s.max():.3f}")

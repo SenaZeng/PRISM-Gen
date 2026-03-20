@@ -1,23 +1,28 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-统一从 Step1 -> Step5 的全流程流水线脚本（位于 core/ 目录中）。
+Unified end-to-end pipeline script: Step 1 -> Step 5 (located in the core/ directory).
 
-本版本修改目标：
-1) Step3A 正常执行（生成/优化分子，产出 step3a_*.csv）
-2) Step3B 之后全部继续执行
-3) 所有关键 CSV 路径统一改为 “项目根目录/results/xxx.csv”（绝对路径）
-4) 兼容某些 step 脚本内部使用 ../results 的相对路径：调用这些 step 时临时 chdir 到 core/
+Design goals:
+1) Step 3A executes normally (generates/optimizes molecules, produces step3a_*.csv)
+2) All downstream steps (Step 3B onwards) continue after Step 3A completes
+3) All key CSV paths are unified under <project_root>/results/ (absolute paths)
+4) For step scripts that internally use ../results relative paths, temporarily
+   chdir to core/ before invoking them to ensure path resolution is correct
 """
 
 import os
 import sys
-# --- 新增：自动处理 GLIBCXX 路径冲突 ---
-# 将环境自带的高版本 libstdc++ 路径加入预加载
-conda_lib_path = "/mnt/hpc/home/wanghongmei/anaconda3/envs/ai_drug_design/lib/libstdc++.so.6"
-if os.path.exists(conda_lib_path):
+# --- Optional: handle GLIBCXX path conflict on HPC systems ---
+# If your conda environment provides a newer libstdc++ than the system default,
+# set the environment variable CONDA_LIB_PATH to its full path before running,
+# e.g.:
+#   export CONDA_LIB_PATH=/path/to/conda/envs/your_env/lib/libstdc++.so.6
+# This is only needed when you encounter GLIBCXX version errors at runtime.
+conda_lib_path = os.environ.get("CONDA_LIB_PATH", "")
+if conda_lib_path and os.path.exists(conda_lib_path):
     os.environ["LD_PRELOAD"] = conda_lib_path
-# ---------------------------------------
+# -------------------------------------------------------------
 
 
 import shutil
@@ -27,41 +32,61 @@ import glob
 import datetime
 import builtins
 from contextlib import contextmanager
-os.environ["LD_LIBRARY_PATH"] = "/mnt/hpc/home/wanghongmei/anaconda3/envs/ai_drug_design/lib:" + os.environ.get("LD_LIBRARY_PATH", "")
+# --- Optional: prepend conda lib directory to LD_LIBRARY_PATH ---
+# Set CONDA_LIB_DIR to your conda environment's lib/ directory if needed,
+# e.g.:
+#   export CONDA_LIB_DIR=/path/to/conda/envs/your_env/lib
+conda_lib_dir = os.environ.get("CONDA_LIB_DIR", "")
+if conda_lib_dir:
+    os.environ["LD_LIBRARY_PATH"] = conda_lib_dir + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+# ----------------------------------------------------------------
 
 
-# ----------------- 0. 路径与并行配置 -----------------
+# ----------------- 0. Path and parallelism configuration -----------------
 
-# 当前脚本所在目录：core/
+# Directory containing this script: core/
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# 项目根目录：core 的上一层
+# Project root: one level above core/
 project_root = os.path.abspath(os.path.join(current_dir, ".."))
 
 
-# 确保项目根目录在 sys.path 中，这样才能 import core
+# Ensure project root is on sys.path so that 'import core' works
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# 结果目录统一放在项目根目录下的 results/
+# All results are written to <project_root>/results/
 RESULTS_DIR = os.path.join(project_root, "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# 目标并行核数（逻辑核）
+# Target number of parallel workers (logical cores)
 TARGET_WORKERS = 40
 
-# 为了避免某些并行库把单个任务开太多线程，这里适度限制 OMP/MKL 线程数
+# -----------------------------------------------------------------
+# Step 3A search parameters — edit these three lines to change run scale.
+#
+# Preset examples:
+#   Smoke test  :  RESTARTS=10,  STEPS=50,  TOP_K_3A=100
+#   Full run    :  RESTARTS=100, STEPS=100, TOP_K_3A=200
+#
+# Rule of thumb: TOP_K_3A should be >= RESTARTS to avoid losing candidates.
+# -----------------------------------------------------------------
+RESTARTS  = 10    # number of random restarts
+STEPS     = 50    # hill-climbing steps per restart
+TOP_K_3A  = 100   # top-K molecules passed to downstream steps
+
+# Limit per-task thread counts to avoid thread over-subscription in parallel libs
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-# ---- 关键 CSV：固定为项目根目录 results 下 ----
+# ---- Key CSV paths: fixed under <project_root>/results/ ----
 STEP3A_RAW_CSV = os.path.join(RESULTS_DIR, "step3a_optimized_molecules_raw.csv")
 STEP3A_TOP2000_CSV = os.path.join(RESULTS_DIR, "step3a_top200.csv")
-STEP3A_STD_CSV = os.path.join(RESULTS_DIR, "step3a_optimized_molecules.csv")  # Step3B 默认要吃这个
+STEP3A_STD_CSV = os.path.join(RESULTS_DIR, "step3a_optimized_molecules.csv")  # Expected input for Step 3B
 
 
 def get_effective_workers():
-    """根据机器实际核数，返回合适的 workers 数。"""
+    """Return the number of workers to use, capped by available CPU cores."""
     n_cores = os.cpu_count() or 1
     workers = min(TARGET_WORKERS, n_cores)
     print(
@@ -73,7 +98,7 @@ def get_effective_workers():
 
 @contextmanager
 def pushd(path: str):
-    """临时切换工作目录，用完自动切回。"""
+    """Temporarily change the working directory; restore it on exit."""
     old = os.getcwd()
     os.chdir(path)
     try:
@@ -82,19 +107,19 @@ def pushd(path: str):
         os.chdir(old)
 
 
-# ----------------- 1. 日志系统：终端 + 文件双写 -----------------
+# ----------------- 1. Logging: simultaneous terminal and file output -----------------
 
 def setup_logging():
     """
-    简易日志系统：
-    - 所有 print 输出仍然会显示在 terminal
-    - 同时写入 results/pipeline_YYYYmmdd_HHMMSS.log
+    Lightweight logging system:
+    - All print() output continues to appear in the terminal
+    - Output is also appended to results/pipeline_YYYYmmdd_HHMMSS.log
     """
     os.makedirs(RESULTS_DIR, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(RESULTS_DIR, f"pipeline_{ts}.log")
 
-    # 打开日志文件（行缓冲）
+    # Open log file with line buffering
     log_fp = open(log_path, "a", encoding="utf-8", buffering=1)
     orig_print = builtins.print
 
@@ -110,22 +135,23 @@ def setup_logging():
     return log_path
 
 
-# ----------------- 2. 工具函数：文件胶水 -----------------
+# ----------------- 2. Utility functions: file glue -----------------
 
 def ensure_file_match(source_pattern, target_name):
     """
-    文件名适配器：
-    如果上一步生成的文件名带有后缀（如 step3a_top2000.csv），
-    而下一步代码写死读取标准名（如 step3a_optimized_molecules.csv），
-    则自动复制一份标准名文件，确保流程不断裂。
+    Filename adapter:
+    If a step produces a file with a non-standard name (e.g. step3a_top2000.csv)
+    but the next step hard-codes a standard name (e.g. step3a_optimized_molecules.csv),
+    this function copies the latest matching file to the expected standard name,
+    preventing pipeline breaks due to filename mismatches.
     """
     target_path = os.path.join(RESULTS_DIR, target_name)
 
-    # 1) 如果目标文件已存在且不为空，直接用
+    # 1) If the target already exists and is non-empty, nothing to do
     if os.path.exists(target_path) and os.path.getsize(target_path) > 10:
         return
 
-    # 2) 否则去 results 找匹配 pattern 的最新文件
+    # 2) Otherwise, search results/ for the latest file matching the pattern
     search_path = os.path.join(RESULTS_DIR, source_pattern)
     candidates = glob.glob(search_path)
 
@@ -145,14 +171,14 @@ def require_file(path: str, hint: str = ""):
         raise FileNotFoundError(f"Missing required file: {path}\n{hint}")
 
 
-# ----------------- 3. 导入各 Step 模块 -----------------
+# ----------------- 3. Import step modules -----------------
 
 try:
     from core import (
         step1_vae,
         step2_surrogate,
         step2b_train_herg_model,
-        step3a_optimizer,          # Step3A: RL 生成/优化
+        step3a_optimizer,          # Step 3A: RL-based generation and optimization
         step3b_run_dft,
         step3c_dft_refine,
         step4a_admet,
@@ -170,7 +196,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-# ----------------- 4. 主流程 -----------------
+# ----------------- 4. Main pipeline -----------------
 
 def main():
     log_path = setup_logging()
@@ -183,7 +209,7 @@ def main():
     start_time = time.time()
     workers = get_effective_workers()
 
-    # --- Step 1: VAE 训练 / 载入 ---
+    # --- Step 1: VAE training / loading ---
     print("\n" + "=" * 50)
     print(">>> Step 1: Fragment-based VAE (FRATTVAE) train/init")
     try:
@@ -194,7 +220,7 @@ def main():
     except Exception as e:
         print(f" Step 1 exception (often ignorable if already trained): {e}")
 
-    # --- Step 2: Surrogate 训练 / 载入 ---
+    # --- Step 2: Surrogate model training / loading ---
     print("\n" + "=" * 50)
     print(">>> Step 2: Uni-Mol surrogate train/init")
     try:
@@ -205,7 +231,7 @@ def main():
     except Exception as e:
         print(f" Step 2 exception (often ignorable if already trained): {e}")
 
-    # --- Step 2B: hERG 模型训练 ---
+    # --- Step 2B: hERG model training ---
     print("\n" + "=" * 50)
     print(">>> Step 2B: hERG model train/update")
     try:
@@ -217,7 +243,7 @@ def main():
         print(f" Step 2B exception (often ignorable if already trained): {e}")
 
     # =========================================================
-    # Step 3A: RL 生成/优化（执行）
+    # Step 3A: RL-based generation and optimization
     # =========================================================
     print("\n" + "=" * 50)
     print(">>> Step 3A: RL optimization / generation (run)")
@@ -225,28 +251,25 @@ def main():
     try:
         with pushd(current_dir):
             if hasattr(step3a_optimizer, "main"):
-                # --- 修改开始：手动设置参数 ---
-                import sys
                 argv_backup = sys.argv[:]
                 sys.argv = [
                     "step3a_optimizer.py",
-                    "--n_restarts", "100",  # 增加起始点数量，100
-                    "--steps", "100",       # 增加搜索深度，100
-                    "--top_k", "200",       # 增加保留给下游的分子数，200
-                    "--n_jobs", "40"          # 使用40个核心数，40
+                    "--n_restarts", str(RESTARTS),   # 10 (quick test) or 100 (production)
+                    "--steps",      str(STEPS),       # 10 (quick test) or 100 (production)
+                    "--top_k",      str(TOP_K_3A),    # 50  (quick test) or 200 (production)
+                    "--n_jobs",     str(workers),
                 ]
                 step3a_optimizer.main()
                 sys.argv = argv_backup
-                # --- 修改结束 ---
                 step3a_ok = True
             else:
                 raise RuntimeError("step3a_optimizer has no main()")
     except Exception as e:
         print(f" Step 3A failed: {e}")
 
-    # 不管 Step3A 是否报错，都做一次“结果文件存在性校验”：
-    # - 如果文件存在：继续跑下游（避免偶发报错但文件已生成的情况）
-    # - 如果文件不存在：直接终止（下游一定会断）
+    # Regardless of whether Step 3A raised an exception, verify output files exist.
+    # If files are present (e.g. exception was non-fatal), continue downstream.
+    # If files are absent, halt immediately since all downstream steps depend on them.
     try:
         require_file(STEP3A_STD_CSV, hint="Expected from Step3A: step3a_optimized_molecules.csv")
         require_file(STEP3A_TOP2000_CSV, hint="Expected from Step3A: step3a_top200.csv")
@@ -255,19 +278,18 @@ def main():
     except Exception as e:
         print(f" Step 3A outputs missing: {e}")
         return
-    # 额外保险：如果存在 step3a_top*.csv，自动拷贝/补齐标准文件名
-    # 原版逻辑是把 step3a_top*.csv 复制为 step3a_optimized_molecules.csv（见 :contentReference[oaicite:1]{index=1}）
+    # Ensure standard filenames are present for downstream steps
     ensure_file_match("step3a_optimized_molecules*.csv", "step3a_optimized_molecules.csv")
     ensure_file_match("step3a_top200*.csv", "step3a_top200.csv")
 
     # =========================================================
-    # Step 3B: xTB 电子结构预筛
+    # Step 3B: xTB electronic structure pre-screening
     # =========================================================
     print("\n" + "=" * 50)
     print(">>> Step 3B: xTB pre-screen (MOCK/Real)")
 
-    # 关键点：step3b_run_dft.py 里很可能用的是 ../results/step3a_optimized_molecules.csv
-    # 为了让 ../results 指向 “项目根/results”，我们临时切到 core/ 目录执行
+    # step3b_run_dft.py internally references ../results/step3a_optimized_molecules.csv
+    # Temporarily chdir to core/ so that ../results resolves to <project_root>/results/
     try:
         with pushd(current_dir):
             step3b_run_dft.main()
@@ -275,7 +297,7 @@ def main():
         print(f" Step 3B failed: {e}")
 
     # =========================================================
-    # Step 3C: 结合 DFT 结果进行重排
+    # Step 3C: DFT-guided re-ranking
     # =========================================================
     print("\n" + "=" * 50)
     print(">>> Step 3C: DFT refine & R_total ranking")
@@ -286,8 +308,7 @@ def main():
         print(f" Step 3C failed: {e}")
 
     # =========================================================
-    # Step 4A: ADMET 筛选  （修复：这里必须跑 step4a_admet）
-    # 原文件这里误跑了 step4b_final_pyscf（见 :contentReference[oaicite:2]{index=2}）
+    # Step 4A: ADMET and hERG screening
     # =========================================================
     print("\n" + "=" * 50)
     print(">>> Step 4A: ADMET & hERG screening")
@@ -300,10 +321,10 @@ def main():
     except Exception as e:
         print(f" Step 4A failed: {e}")
 
-    # 确保 Step 4B 能找到 Step 4A 的输出（原文件也有这段胶水逻辑）
+    # Ensure Step 4B can locate Step 4A output under the standard filename
     ensure_file_match("step4a_admet*.csv", "step4a_admet_final.csv")
 
-    # === 新增：Active_Set 统计（ADMET Pass） ===
+    # === Report Active_Set count (ADMET Pass) ===
     try:
         step4a_out = os.path.join(RESULTS_DIR, "step4a_admet_final.csv")
         if os.path.exists(step4a_out):
@@ -311,17 +332,17 @@ def main():
             if "Active_Set" in _df4a.columns:
                 print(f" Active_Set(ADMET Pass) in Step4A = {int(_df4a['Active_Set'].sum())} / {len(_df4a)}")
     except Exception as _e:
-        print(f" Active_Set 统计失败（不影响流程继续）：{_e}")
+        print(f"⚠️ Active_Set count failed (pipeline continues): {_e}")
 
     # =========================================================
-    # Step 4B: PySCF 高精度 DFT 精修
+    # Step 4B: High-accuracy DFT refinement with PySCF
     # =========================================================
     print("\n" + "=" * 50)
     print(">>> Step 4B: PySCF DFT refine (B3LYP/6-31G*)")
     print("    Note: typically only refine top few molecules.")
     try:
         argv_backup = sys.argv[:]
-        # 你也可以把 top_k 从 20 改小一些（比如 5），否则 PySCF 很耗时
+        # Reduce top_k if PySCF runtime is a concern
         sys.argv = ["step4b_final_pyscf.py", "--top_k", "50", "--workers", str(workers)]
         with pushd(current_dir):
             step4b_final_pyscf.main()
@@ -331,7 +352,7 @@ def main():
         sys.argv = argv_backup
 
     # =========================================================
-    # Step 4C: 汇总主表
+    # Step 4C: Merge master summary table (pre-docking)
     # =========================================================
     print("\n" + "=" * 50)
     print(">>> Step 4C: merge master summary (pre-docking)")
@@ -342,7 +363,7 @@ def main():
         print(f" Step 4C failed: {e}")
 
     # =========================================================
-    # Step 5A: 多靶点广谱对接
+    # Step 5A: Multi-target broad-spectrum docking
     # =========================================================
     print("\n" + "=" * 50)
     print(">>> Step 5A: broad-spectrum docking")
@@ -358,6 +379,8 @@ def main():
             "--top_n", "300",
             "--workers", str(workers),
             "--vina_cpu", "1",
+            "--vina_seed",  "42",
+            "--rdkit_seed", "42",
         ]
         with pushd(current_dir):
             step5a_docking.main()
@@ -367,7 +390,7 @@ def main():
         sys.argv = argv_backup
 
     # =========================================================
-    # Step 5B: 终极汇总
+    # Step 5B: Final merge and report
     # =========================================================
     print("\n" + "=" * 50)
     print(">>> Step 5B: final merge/report")
@@ -381,7 +404,7 @@ def main():
         print(f" Step 5B failed: {e}")
 
     # =========================================================
-    # Final Extraction: 提取真正的优胜候选
+    # Final extraction: export top-ranked candidates
     # =========================================================
     print("\n" + "=" * 50)
     print(">>> Pipeline Final: export final candidates list")

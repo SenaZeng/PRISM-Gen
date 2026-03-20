@@ -1,10 +1,10 @@
-# 文件: core/step2_surrogate.py
+# File: core/step2_surrogate.py
 # -*- coding: utf-8 -*-
 """
-Step 2: Uni-Mol 代理模型封装
-- 使用 UniMolRepr 将 SMILES 编码为 CLS embedding
-- 使用 RandomForestRegressor 做活性回归 (pIC50)
-- 暴露 SurrogateModel.predict(smiles_list) / predict_single(smiles)
+Step 2: Uni-Mol surrogate model wrapper
+- Encodes SMILES into CLS embeddings using UniMolRepr
+- Uses a RandomForestRegressor for activity regression (pIC50)
+- Exposes SurrogateModel.predict(smiles_list) / predict_single(smiles)
 """
 
 import os
@@ -17,7 +17,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 
-# --- 1. 路径挂载 unimol_source ---
+# --- 1. Mount unimol_source onto sys.path ---
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 unimol_path = os.path.join(current_dir, 'unimol_source')
@@ -25,56 +25,56 @@ if unimol_path not in sys.path:
     sys.path.append(unimol_path)
 
 try:
-    # 调用 Uni-Mol 的官方接口
+    # Use the official Uni-Mol interface
     from unimol_tools import UniMolRepr
 except ImportError:
-    print("【错误】无法导入 unimol_tools，请检查 core/unimol_source 是否存在且可用。")
+    print("ERROR: Cannot import unimol_tools. Check that core/unimol_source exists and is accessible.")
     raise
 
 
 class SurrogateModel:
     """
-    基于 Uni-Mol 表征 + sklearn RandomForest 的代理模型
-    - 用于快速预测 Mpro 抑制活性 (pIC50)
+    Surrogate model based on Uni-Mol representations + sklearn RandomForest.
+    Used for rapid prediction of Mpro inhibitory activity (pIC50).
     """
     def __init__(self, work_dir="../results/surrogate_model"):
-        # 工作目录，用于保存 sklearn 模型
+        # Working directory for saving the sklearn model
         self.work_dir = os.path.abspath(os.path.join(current_dir, work_dir))
         if not os.path.exists(self.work_dir):
             os.makedirs(self.work_dir, exist_ok=True)
 
         self.sklearn_model_path = os.path.join(self.work_dir, "activity_predictor.pkl")
 
-        # 初始化 Uni-Mol 特征提取器
-        print("【初始化】加载 Uni-Mol 预训练模型 (代理表征)...")
-        # data_type='molecule' 表示处理小分子；remove_hs=True 对应 mol_pre_no_h 预训练
+        # Initialize Uni-Mol feature extractor
+        print("[Init] Loading Uni-Mol pretrained model (surrogate representation)...")
+        # data_type='molecule' for small molecules; remove_hs=True matches mol_pre_no_h pretraining
         self.clf = UniMolRepr(data_type='molecule', remove_hs=True)
         self.model = None
 
-    # ------------- 内部: Uni-Mol 表征提取 ------------- #
+    # ------------- Internal: Uni-Mol embedding extraction ------------- #
 
     def _get_embeddings(self, smiles_list):
         """
-        调用 Uni-Mol 将 SMILES 转为高维向量 (N, 512)
-        - UniMolRepr.get_repr: 会自动完成 3D 构象生成 + Transformer 前向
-        - 返回 dict, 其中 'cls_repr' 是 [N, 512]
+        Encode SMILES into high-dimensional vectors (N, 512) using Uni-Mol.
+        - UniMolRepr.get_repr: automatically generates 3D conformers and runs the Transformer forward pass
+        - Returns a dict; 'cls_repr' contains [N, 512]
         """
-        print(f"【特征提取】正在处理 {len(smiles_list)} 个分子 (自动生成 3D 构象)...")
+        print(f"[Feature extraction] Processing {len(smiles_list)} molecules (3D conformers generated automatically)...")
         reprs = self.clf.get_repr(smiles_list, return_atomic_reprs=False)
-        # reprs['cls_repr'] 是一个 tensor-like/array-like，转成 numpy
+        # reprs['cls_repr'] is tensor-like/array-like; convert to numpy
         X = np.array(reprs['cls_repr'])
         return X
 
-    # ------------- 训练流程 ------------- #
+    # ------------- Training pipeline ------------- #
 
     def train(self, data_path):
         """
-        训练流程：
-        - 读取 CSV
-        - 提取 Uni-Mol CLS embedding
-        - 训练 RandomForest 回归模型预测 pIC50
+        Training pipeline:
+        - Read CSV
+        - Extract Uni-Mol CLS embeddings
+        - Train a RandomForest regression model to predict pIC50
         """
-        print(f"【训练】读取数据: {data_path}")
+        print(f"[Train] Reading data: {data_path}")
         df = pd.read_csv(data_path)
 
         if 'pchembl_value' in df.columns:
@@ -84,20 +84,20 @@ class SurrogateModel:
             vals = np.where(vals <= 0, 1e-9, vals)
             y = 9 - np.log10(vals)  # pIC50 = 9 - log10(nM)
         else:
-            raise ValueError("CSV 中找不到活性列 (pchembl_value 或 Standard Value)")
+            raise ValueError("Activity column not found in CSV (expected 'pchembl_value' or 'Standard Value')")
 
         X_smiles = df['smiles'].astype(str).tolist()
 
-        # 1. 抽取 Uni-Mol 表征
+        # 1. Extract Uni-Mol representations
         X_emb = self._get_embeddings(X_smiles)
 
-        # 2. 划分训练/测试集
+        # 2. Train/test split
         X_train, X_test, y_train, y_test = train_test_split(
             X_emb, y, test_size=0.2, random_state=42
         )
 
-        # 3. 训练 RandomForest 回归
-        print("【训练】开始训练下游回归模型 (RandomForestRegressor)...")
+        # 3. Train RandomForest regressor
+        print("[Train] Fitting downstream regression model (RandomForestRegressor)...")
         self.model = RandomForestRegressor(
             n_estimators=200,
             n_jobs=-1,
@@ -105,31 +105,31 @@ class SurrogateModel:
         )
         self.model.fit(X_train, y_train)
 
-        # 4. 简单评估
+        # 4. Quick evaluation
         score = self.model.score(X_test, y_test)
         y_pred = self.model.predict(X_test)
         rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
-        print(f"【评估】R2 Score: {score:.4f}, RMSE: {rmse:.4f}")
+        print(f"[Eval] R2 Score: {score:.4f}, RMSE: {rmse:.4f}")
 
-        # 5. 保存 sklearn 模型
+        # 5. Save sklearn model
         joblib.dump(self.model, self.sklearn_model_path)
-        print(f"【保存】模型已保存至 {self.sklearn_model_path}")
+        print(f"[Save] Model saved to {self.sklearn_model_path}")
 
-    # ------------- 加载与预测接口 ------------- #
+    # ------------- Load and predict interfaces ------------- #
 
     def load_model(self):
-        """加载训练好的 sklearn 模型"""
+        """Load a previously trained sklearn model."""
         if os.path.exists(self.sklearn_model_path):
             self.model = joblib.load(self.sklearn_model_path)
-            print(f"✅ 代理模型加载成功: {self.sklearn_model_path}")
+            print(f"✅ Surrogate model loaded: {self.sklearn_model_path}")
         else:
-            print("⚠️ 未找到代理模型，请先运行 train()")
+            print("⚠️ Surrogate model not found. Please run train() first.")
 
     def predict(self, smiles_list):
         """
-        预测接口：
-        - 输入: 一组 SMILES 字符串
-        - 输出: 对应的 pIC50 预测值 (list[float])
+        Prediction interface:
+        - Input:  a list of SMILES strings
+        - Output: corresponding predicted pIC50 values (list[float])
         """
         if self.model is None:
             self.load_model()
@@ -141,45 +141,45 @@ class SurrogateModel:
         return preds
 
     def predict_pIC50(self, smiles_list):
-        """语义更明确的别名：预测 pIC50"""
+        """Semantically explicit alias for predict(): returns predicted pIC50 values."""
         return self.predict(smiles_list)
 
     def predict_single(self, smiles: str) -> float:
-        """方便 Step 3 调用的单个预测接口"""
+        """Single-molecule prediction interface for use in Step 3."""
         return float(self.predict([smiles])[0])
 
 
-# --- 测试 / 训练脚本 --- #
+# --- Test / training entry point --- #
 
 if __name__ == "__main__":
     agent = SurrogateModel()
 
-    # 使用基于当前脚本位置的路径
+    # Resolve data path relative to this script's location
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_file = os.path.abspath(
         os.path.join(script_dir, "../data/processed/mpro_actives_clean.csv")
     )
 
-    print(f"数据路径锁定: {data_file}")
+    print(f"Data path resolved to: {data_file}")
 
-    # 如果没有训练过，就训练一次
+    # Train if no saved model exists
     if not os.path.exists(agent.sklearn_model_path):
         if os.path.exists(data_file):
-            print(">>> 首次运行，开始训练代理模型...")
+            print(">>> First run: starting surrogate model training...")
             agent.train(data_file)
         else:
             print(
-                f"❌ 错误：找不到训练数据！\n"
-                f"请检查 {data_file} 是否存在。\n"
-                f"提示：请先运行 'python tools/data_cleaner.py'"
+                f"❌ Error: training data not found!\n"
+                f"Expected: {data_file}\n"
+                f"Hint: run 'python tools/data_cleaner.py' first."
             )
 
-    # 简单预测测试
+    # Quick prediction test
     test_mols = [
         "CC(=O)Nc1ccc(O)cc1",
         "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",
     ]
-    print("\n>>> 测试预测 (Mpro 活性 pIC50):")
+    print("\n>>> Prediction test (Mpro activity pIC50):")
     scores = agent.predict(test_mols)
     for smi, score in zip(test_mols, scores):
-        print(f"SMILES: {smi[:30]}... -> pIC50 预测: {score:.2f}")
+        print(f"SMILES: {smi[:30]}... -> predicted pIC50: {score:.2f}")
