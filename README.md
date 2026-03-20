@@ -2,7 +2,7 @@
 
 **Physics-guided Robust Inhibitor Selection Method — Generative Module**
 
-A multi-fidelity computational framework for the discovery of broad-spectrum coronavirus main protease (M<sup>pro</sup>) inhibitors.
+A multi-fidelity computational framework for the discovery of broad-spectrum coronavirus main protease (Mpro) inhibitors.
 
 ---
 
