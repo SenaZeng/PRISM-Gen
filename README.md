@@ -81,7 +81,7 @@ For detailed installation instructions, dependency versions, and troubleshooting
 The FRATTVAE checkpoint (~125 MB) is archived on Zenodo:
 
 ```bash
-wget https://zenodo.org/records/18764996/files/model_best.pth -O pipeline/models/model_best.pth
+wget https://zenodo.org/records/18764996/files/model_best.pth -O pipeline/pretrained_model/model/model_best.pth
 ```
 
 **Zenodo DOI:** [10.5281/zenodo.18764996](https://doi.org/10.5281/zenodo.18764996)
