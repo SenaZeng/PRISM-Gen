@@ -106,7 +106,7 @@ def setup_logging():
         log_fp.write(text + "\n")
 
     builtins.print = tee_print
-    orig_print(f"📝 Pipeline log file: {log_path}")
+    orig_print(f" Pipeline log file: {log_path}")
     return log_path
 
 
@@ -131,11 +131,11 @@ def ensure_file_match(source_pattern, target_name):
 
     if candidates:
         latest = max(candidates, key=os.path.getmtime)
-        print(f"🔄 [Pipeline Fix] Copy {os.path.basename(latest)} -> {target_name}")
+        print(f" [Pipeline Fix] Copy {os.path.basename(latest)} -> {target_name}")
         shutil.copy(latest, target_path)
     else:
         print(
-            f"⚠️ [Pipeline Warning] Not found pattern={source_pattern}. "
+            f" [Pipeline Warning] Not found pattern={source_pattern}. "
             f"Next step may fail due to missing input."
         )
 
@@ -161,9 +161,9 @@ try:
         step5a_docking,
         step5b_utils_merge,
     )
-    print("✅ Imported all core modules")
+    print(" Imported all core modules")
 except ImportError as e:
-    print(f"❌ Import failed: {e}")
+    print(f" Import failed: {e}")
     print("Run it from project root, e.g.:")
     print("  cd /path/to/Mpro_AI_Design")
     print("  python core/run_pipeline.py")
@@ -175,7 +175,7 @@ except ImportError as e:
 def main():
     log_path = setup_logging()
 
-    print("🚀 Start pipeline (core/run_pipeline.py)")
+    print(" Start pipeline (core/run_pipeline.py)")
     print(f"   Project root: {project_root}")
     print(f"   Results dir : {RESULTS_DIR}")
     print(f"   Log file    : {log_path}")
@@ -190,9 +190,9 @@ def main():
         if hasattr(step1_vae, "main"):
             step1_vae.main()
         else:
-            print("ℹ️ step1_vae has no main(), imported only.")
+            print(" step1_vae has no main(), imported only.")
     except Exception as e:
-        print(f"⚠️ Step 1 exception (often ignorable if already trained): {e}")
+        print(f" Step 1 exception (often ignorable if already trained): {e}")
 
     # --- Step 2: Surrogate 训练 / 载入 ---
     print("\n" + "=" * 50)
@@ -201,9 +201,9 @@ def main():
         if hasattr(step2_surrogate, "main"):
             step2_surrogate.main()
         else:
-            print("ℹ️ step2_surrogate has no main(), imported only.")
+            print(" step2_surrogate has no main(), imported only.")
     except Exception as e:
-        print(f"⚠️ Step 2 exception (often ignorable if already trained): {e}")
+        print(f" Step 2 exception (often ignorable if already trained): {e}")
 
     # --- Step 2B: hERG 模型训练 ---
     print("\n" + "=" * 50)
@@ -212,9 +212,9 @@ def main():
         if hasattr(step2b_train_herg_model, "main"):
             step2b_train_herg_model.main()
         else:
-            print("ℹ️ step2b_train_herg_model has no main(), imported only.")
+            print(" step2b_train_herg_model has no main(), imported only.")
     except Exception as e:
-        print(f"⚠️ Step 2B exception (often ignorable if already trained): {e}")
+        print(f" Step 2B exception (often ignorable if already trained): {e}")
 
     # =========================================================
     # Step 3A: RL 生成/优化（执行）
@@ -242,7 +242,7 @@ def main():
             else:
                 raise RuntimeError("step3a_optimizer has no main()")
     except Exception as e:
-        print(f"❌ Step 3A failed: {e}")
+        print(f" Step 3A failed: {e}")
 
     # 不管 Step3A 是否报错，都做一次“结果文件存在性校验”：
     # - 如果文件存在：继续跑下游（避免偶发报错但文件已生成的情况）
@@ -250,10 +250,10 @@ def main():
     try:
         require_file(STEP3A_STD_CSV, hint="Expected from Step3A: step3a_optimized_molecules.csv")
         require_file(STEP3A_TOP2000_CSV, hint="Expected from Step3A: step3a_top200.csv")
-        print(f"✅ Step3A output ready: {STEP3A_STD_CSV}")
-        print(f"✅ Step3A output ready: {STEP3A_TOP2000_CSV}")
+        print(f" Step3A output ready: {STEP3A_STD_CSV}")
+        print(f" Step3A output ready: {STEP3A_TOP2000_CSV}")
     except Exception as e:
-        print(f"❌ Step 3A outputs missing: {e}")
+        print(f" Step 3A outputs missing: {e}")
         return
     # 额外保险：如果存在 step3a_top*.csv，自动拷贝/补齐标准文件名
     # 原版逻辑是把 step3a_top*.csv 复制为 step3a_optimized_molecules.csv（见 :contentReference[oaicite:1]{index=1}）
@@ -272,7 +272,7 @@ def main():
         with pushd(current_dir):
             step3b_run_dft.main()
     except Exception as e:
-        print(f"❌ Step 3B failed: {e}")
+        print(f" Step 3B failed: {e}")
 
     # =========================================================
     # Step 3C: 结合 DFT 结果进行重排
@@ -283,7 +283,7 @@ def main():
         with pushd(current_dir):
             step3c_dft_refine.main(top_k=2000)
     except Exception as e:
-        print(f"❌ Step 3C failed: {e}")
+        print(f" Step 3C failed: {e}")
 
     # =========================================================
     # Step 4A: ADMET 筛选  （修复：这里必须跑 step4a_admet）
@@ -298,7 +298,7 @@ def main():
             else:
                 raise RuntimeError("step4a_admet has no main()")
     except Exception as e:
-        print(f"❌ Step 4A failed: {e}")
+        print(f" Step 4A failed: {e}")
 
     # 确保 Step 4B 能找到 Step 4A 的输出（原文件也有这段胶水逻辑）
     ensure_file_match("step4a_admet*.csv", "step4a_admet_final.csv")
@@ -309,9 +309,9 @@ def main():
         if os.path.exists(step4a_out):
             _df4a = pd.read_csv(step4a_out)
             if "Active_Set" in _df4a.columns:
-                print(f"✅ Active_Set(ADMET Pass) in Step4A = {int(_df4a['Active_Set'].sum())} / {len(_df4a)}")
+                print(f" Active_Set(ADMET Pass) in Step4A = {int(_df4a['Active_Set'].sum())} / {len(_df4a)}")
     except Exception as _e:
-        print(f"⚠️ Active_Set 统计失败（不影响流程继续）：{_e}")
+        print(f" Active_Set 统计失败（不影响流程继续）：{_e}")
 
     # =========================================================
     # Step 4B: PySCF 高精度 DFT 精修
@@ -327,7 +327,7 @@ def main():
             step4b_final_pyscf.main()
         sys.argv = argv_backup
     except Exception as e:
-        print(f"❌ Step 4B failed: {e}")
+        print(f" Step 4B failed: {e}")
         sys.argv = argv_backup
 
     # =========================================================
@@ -339,7 +339,7 @@ def main():
         with pushd(current_dir):
             step4c_utils_merge_results.merge_all_steps()
     except Exception as e:
-        print(f"❌ Step 4C failed: {e}")
+        print(f" Step 4C failed: {e}")
 
     # =========================================================
     # Step 5A: 多靶点广谱对接
@@ -363,7 +363,7 @@ def main():
             step5a_docking.main()
         sys.argv = argv_backup
     except Exception as e:
-        print(f"❌ Step 5A failed: {e}")
+        print(f" Step 5A failed: {e}")
         sys.argv = argv_backup
 
     # =========================================================
@@ -378,7 +378,7 @@ def main():
             step5b_utils_merge.main()
         sys.argv = argv_backup        
     except Exception as e:
-        print(f"❌ Step 5B failed: {e}")
+        print(f" Step 5B failed: {e}")
 
     # =========================================================
     # Final Extraction: 提取真正的优胜候选
@@ -404,20 +404,20 @@ def main():
 
             if not df_final.empty:
                 df_final.to_csv(final_out_path, index=False)
-                print(f"🏆 Exported: {final_out_path}")
+                print(f" Exported: {final_out_path}")
                 print(f"   Molecules: {len(df_final)}")
                 cols = ["smiles", "Broad_Spectrum_Score", "R_global", "Broad_Tier", "pIC50"]
                 print(df_final[[c for c in cols if c in df_final.columns]].head())
             else:
-                print("⚠️ Broad_Spectrum_Score exists but all empty.")
+                print(" Broad_Spectrum_Score exists but all empty.")
         else:
-            print("⚠️ No Broad_Spectrum_Score column, cannot export final candidates.")
+            print(" No Broad_Spectrum_Score column, cannot export final candidates.")
     else:
-        print(f"⚠️ Missing summary: {summary_path} (check Step 5B).")
+        print(f" Missing summary: {summary_path} (check Step 5B).")
 
     print("\n" + "=" * 50)
-    print(f"✅ Pipeline finished. Total time: {time.time() - start_time:.1f} sec")
-    print(f"📝 Log file: {log_path}")
+    print(f" Pipeline finished. Total time: {time.time() - start_time:.1f} sec")
+    print(f" Log file: {log_path}")
 
 
 if __name__ == "__main__":
