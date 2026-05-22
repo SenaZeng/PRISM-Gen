@@ -116,6 +116,9 @@ python core/step5a_docking.py \
 | MERS-CoV M<sup>pro</sup> | [PDB: 4YLU](https://www.rcsb.org/structure/4YLU) | Docking target |
 
 ---
+## other Protein Targets
+
+For adapting to other protein targets, see [TUTORIAL.md](./TUTORIAL.md).
 
 ## Interactive Demo
 
