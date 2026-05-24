@@ -11,7 +11,7 @@ For installation and reproduction of paper results, see `README.md`.
 
 ---
 
-## What Needs to Change
+## What Needs to Change 
 
 | Component | File | What to replace or adjust |
 |---|---|---|
